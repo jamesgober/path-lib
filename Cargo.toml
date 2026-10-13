@@ -1,0 +1,44 @@
+[package]
+name = "path-lib"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+readme = "README.md"
+license = "Apache-2.0 OR MIT"
+authors = ["James Gober <me@jamesgober.com>"]
+description = "Cross-platform application and OS directory resolution for Rust, with user and global scopes, hardened sub-path joining, and guarded filesystem operations. Zero dependencies."
+keywords = ["path", "directories", "xdg", "known-folders", "app-dirs"]
+categories = ["filesystem", "os"]
+documentation = "https://docs.rs/path-lib"
+repository = "https://github.com/jamesgober/path-lib"
+homepage = "https://github.com/jamesgober/path-lib"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "path_lib"
+path = "src/lib.rs"
+
+# No runtime dependencies. Windows known folders are resolved through a
+# two-function FFI declaration against shell32/ole32 (see
+# src/platform/windows.rs) rather than pulling in `windows-sys`.
+[dependencies]
+
+[dev-dependencies]
+# Benchmarks (REPS: criterion for every performance-sensitive path).
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Property tests for the sub-path validator (REPS: proptest for
+# algorithms that must hold for all inputs).
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "path_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
