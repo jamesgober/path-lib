@@ -244,3 +244,53 @@ fn test_app_construction_is_consistent_across_threads() {
     let apps: Vec<App> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert!(apps.windows(2).all(|w| w[0] == w[1]));
 }
+
+#[test]
+fn test_with_dir_and_with_env_compose_with_ensure() {
+    let sb = Sandbox::new("app-override");
+    let app = App::portable("Port", sb.path())
+        .unwrap()
+        .with_dir(Kind::Logs, sb.join("elsewhere/logs"))
+        .unwrap()
+        .with_env("PATH_LIB_TEST_UNSET_PREFIX")
+        .unwrap();
+    let logs = app.ensure(Kind::Logs).unwrap();
+    assert!(logs.is_dir());
+    assert!(logs.ends_with(Path::new("elsewhere").join("logs")));
+}
+
+#[test]
+fn test_with_dir_rejects_relative_and_duplicate() {
+    let app = App::new("PathLibTest").unwrap();
+    let config = app.config().to_path_buf();
+    assert!(app.clone().with_dir(Kind::Data, "relative").is_err());
+    assert!(app.with_dir(Kind::Data, config).is_err());
+}
+
+#[test]
+fn test_auto_without_marker_next_to_test_binary_is_user_scope() {
+    let marker = path_lib::exe_dir().unwrap().join(path_lib::PORTABLE_MARKER);
+    if marker.exists() {
+        return;
+    }
+    assert_eq!(App::auto("PathLibTest").unwrap().scope(), Scope::User);
+}
+
+#[test]
+fn test_dirs_matches_dir_for_every_kind() {
+    let app = App::new("PathLibTest").unwrap();
+    assert_eq!(app.dirs().count(), Kind::ALL.len());
+    for (kind, dir) in app.dirs() {
+        assert_eq!(app.dir(kind), dir);
+    }
+}
+
+#[test]
+fn test_expand_home_end_to_end() {
+    let home = path_lib::home().unwrap();
+    assert_eq!(path_lib::expand_home("~").unwrap(), home);
+    assert_eq!(
+        path_lib::expand_home("~/x/y").unwrap(),
+        home.join("x").join("y")
+    );
+}

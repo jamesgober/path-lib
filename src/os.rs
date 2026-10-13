@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Reason, Result};
 use crate::join::clean;
 use crate::platform::{self, SystemBases, UserBases};
 
@@ -171,6 +171,49 @@ user_folder!(
     videos
 );
 
+/// Expands a leading `~` to the current user's home directory.
+///
+/// `~` alone becomes [`home`]; `~/rest` (or `~\rest` on Windows) becomes
+/// `home/rest`, cleaned. Anything that does not start with `~` is returned
+/// unchanged, so the function is safe to apply to every path read from a
+/// configuration file or environment variable. Nothing else is expanded:
+/// `$VARS` and `%VARS%` are left alone on purpose, because expanding them
+/// would let configuration values pull in arbitrary environment state.
+///
+/// # Errors
+///
+/// - [`Error::InvalidPath`] with [`Reason::OtherUser`] for `~name`, which
+///   would need another user's home directory.
+/// - [`Error::Unresolved`] when the input starts with `~` and the home
+///   directory cannot be determined.
+///
+/// # Examples
+///
+/// ```
+/// let home = path_lib::home()?;
+/// assert_eq!(path_lib::expand_home("~/data")?, home.join("data"));
+/// assert_eq!(path_lib::expand_home("/var/lib/x")?, std::path::Path::new("/var/lib/x"));
+/// assert!(path_lib::expand_home("~root/x").is_err());
+/// # Ok::<(), path_lib::Error>(())
+/// ```
+pub fn expand_home(input: impl AsRef<str>) -> Result<PathBuf> {
+    expand_home_with(input.as_ref(), home)
+}
+
+fn expand_home_with(input: &str, home: impl FnOnce() -> Result<&'static Path>) -> Result<PathBuf> {
+    let Some(rest) = input.strip_prefix('~') else {
+        return Ok(PathBuf::from(input));
+    };
+    match rest.chars().next() {
+        None => Ok(home()?.to_path_buf()),
+        Some(c) if std::path::is_separator(c) => {
+            let rest = rest.trim_start_matches(std::path::is_separator);
+            Ok(clean(home()?.join(rest)))
+        }
+        Some(_) => Err(Error::invalid_path(input, Reason::OtherUser)),
+    }
+}
+
 /// The root of the system volume: `/` on Unix, the system drive (usually
 /// `C:\`) on Windows.
 ///
@@ -262,6 +305,69 @@ mod tests {
         for f in [documents, desktop, downloads, pictures, music, videos] {
             assert!(f().unwrap().is_absolute());
         }
+    }
+
+    #[test]
+    fn test_os_names_for_every_variant() {
+        assert_eq!(Os::Windows.name(), "windows");
+        assert_eq!(Os::MacOs.name(), "macos");
+        assert_eq!(Os::Linux.name(), "linux");
+        assert_eq!(Os::OtherUnix.name(), "unix");
+    }
+
+    // Must match the `home` signature it stands in for.
+    #[allow(clippy::unnecessary_wraps)]
+    fn fake_home() -> Result<&'static Path> {
+        Ok(Path::new(if cfg!(windows) {
+            r"C:\Users\u"
+        } else {
+            "/home/u"
+        }))
+    }
+
+    #[test]
+    fn test_expand_home_forms() {
+        let h = fake_home().unwrap();
+        assert_eq!(expand_home_with("~", fake_home).unwrap(), h);
+        assert_eq!(
+            expand_home_with("~/a/b", fake_home).unwrap(),
+            h.join("a").join("b")
+        );
+        assert_eq!(
+            expand_home_with("~//a/./b/", fake_home).unwrap(),
+            h.join("a").join("b")
+        );
+        assert_eq!(
+            expand_home_with("rel/x", fake_home).unwrap(),
+            PathBuf::from("rel/x")
+        );
+        assert_eq!(expand_home_with("", fake_home).unwrap(), PathBuf::new());
+        assert_eq!(
+            expand_home_with("a~b", fake_home).unwrap(),
+            PathBuf::from("a~b")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_expand_home_accepts_backslash_on_windows() {
+        let h = fake_home().unwrap();
+        assert_eq!(expand_home_with(r"~\a", fake_home).unwrap(), h.join("a"));
+    }
+
+    #[test]
+    fn test_expand_home_rejects_other_users_and_reports_missing_home() {
+        let err = expand_home_with("~root/x", fake_home).unwrap_err();
+        assert_eq!(err.reason(), Some(Reason::OtherUser));
+        let missing = || Err(Error::Unresolved { dir: "home" });
+        assert!(matches!(
+            expand_home_with("~/x", missing),
+            Err(Error::Unresolved { .. })
+        ));
+        assert!(
+            expand_home_with("/abs", missing).is_ok(),
+            "home only needed for ~"
+        );
     }
 
     #[test]

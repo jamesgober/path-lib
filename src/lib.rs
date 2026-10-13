@@ -48,7 +48,26 @@
 //! `user-dirs.dirs` are honoured on Linux and the BSDs. Windows folders
 //! come from the Known Folder API, so OneDrive-redirected Documents
 //! resolve correctly. [`App::portable`] puts everything under one folder
-//! of your choosing instead.
+//! of your choosing instead, and [`App::auto`] picks a portable layout
+//! next to the executable when a [`PORTABLE_MARKER`] file (`.portable`)
+//! is there, and per-user directories otherwise.
+//!
+//! Individual directories can be relocated after construction.
+//! [`App::with_dir`] replaces one kind's directory with an absolute path;
+//! [`App::with_env`] does the same from `<PREFIX>_<KIND>_DIR` environment
+//! variables, which is how services are usually reconfigured in
+//! containers. Neither lets two kinds share a directory.
+//!
+//! ```
+//! use path_lib::{App, Kind};
+//!
+//! let cache = std::env::temp_dir().join("hivedb-cache");
+//! let app = App::new("HiveDB")?
+//!     .with_dir(Kind::Cache, &cache)?     // explicit
+//!     .with_env("HIVEDB")?;               // HIVEDB_DATA_DIR, ...
+//! # let _ = app;
+//! # Ok::<(), path_lib::Error>(())
+//! ```
 //!
 //! # Hardened sub-paths
 //!
@@ -77,6 +96,8 @@
 //! [`music`], [`videos`], [`root`], [`temp`], [`exe`], and [`exe_dir`]
 //! return cached `&'static Path` values. [`os()`] is a compile-time
 //! constant: the operating system never needs detecting at runtime.
+//! [`expand_home`] turns `~` and `~/rest` from configuration values into
+//! paths under the home directory; it deliberately expands nothing else.
 //!
 //! # Filesystem operations
 //!
@@ -85,6 +106,25 @@
 //! symbolic links while walking a tree, and refuse to remove or move
 //! roots, the home directory, and the user's standard folders. [`App`]
 //! exposes the common ones scoped to its directories.
+//!
+//! [`write_atomic`] is the one operation meant to overwrite: it replaces a
+//! file through a flushed temporary sibling and a rename, so readers see
+//! either the old contents or the complete new contents, never a partial
+//! write.
+//!
+//! ```
+//! let file = std::env::temp_dir().join("path-lib-doc-crate").join("app.conf");
+//! path_lib::write_atomic(&file, "port = 7000\n")?;
+//! assert_eq!(std::fs::read_to_string(&file).unwrap(), "port = 7000\n");
+//! # path_lib::remove(file.parent().unwrap())?;
+//! # Ok::<(), path_lib::Error>(())
+//! ```
+//!
+//! # Stability
+//!
+//! The public API, the directory tables, and the behaviour described
+//! above are frozen for every 1.x release. The terms are in
+//! `docs/STABILITY-1.0.md` in the repository.
 //!
 //! # Platform support
 //!
@@ -114,16 +154,21 @@
 mod app;
 mod error;
 mod join;
+mod kind;
 mod ops;
 mod os;
 mod platform;
 mod rules;
 
-pub use app::{App, Kind, Scope};
+pub use app::{App, PORTABLE_MARKER};
 pub use error::{Error, PREVIEW_CHARS, Reason, Result};
 pub use join::{clean, join, sanitize};
-pub use ops::{MAX_WALK_DEPTH, copy, exists, find, list, make_dir, make_file, move_to, remove};
+pub use kind::{Kind, Scope};
+pub use ops::{
+    MAX_WALK_DEPTH, copy, exists, find, list, make_dir, make_file, move_to, remove, write_atomic,
+};
 pub use os::{
-    Os, desktop, documents, downloads, exe, exe_dir, home, music, os, pictures, root, temp, videos,
+    Os, desktop, documents, downloads, exe, exe_dir, expand_home, home, music, os, pictures, root,
+    temp, videos,
 };
 pub use rules::{MAX_DEPTH, MAX_INPUT_BYTES, MAX_SEGMENT_BYTES};

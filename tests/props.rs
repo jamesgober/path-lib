@@ -82,14 +82,14 @@ proptest! {
         prop_assert!(curdirs == 0 || once == Path::new("."));
     }
 
-    /// Joining is deterministic regardless of which slash style is used.
+    /// Joining gives the same outcome regardless of slash style: the same
+    /// path, or the same rejection (segments such as `con` are Windows
+    /// device names and are rejected either way).
     #[test]
     fn prop_join_slash_style_is_irrelevant(segs in prop::collection::vec("[a-z0-9]{1,6}", 0..10)) {
         let fwd = segs.join("/");
         let back = segs.join("\\");
-        prop_assert_eq!(
-            path_lib::join(base(), &fwd).unwrap(),
-            path_lib::join(base(), &back).unwrap()
-        );
+        let outcome = |s: &str| path_lib::join(base(), s).map_err(|e| e.reason());
+        prop_assert_eq!(outcome(&fwd), outcome(&back));
     }
 }

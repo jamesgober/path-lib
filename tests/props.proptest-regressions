@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e8779f5964024e0e243f24a42651aec590e48bb337109caf4d26539da8adaf4d # shrinks to input = "/C:C:"
+cc a5ebf054f2560243e1c30d500d3e4fd8fc8d3ed199b59660885921fc7d537e88 # shrinks to segs = ["com0"]

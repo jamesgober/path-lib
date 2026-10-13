@@ -4,102 +4,15 @@
 //! eight directories an application keeps files in ([`Kind`]), for one
 //! [`Scope`], and hands out hardened sub-paths inside them.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Reason, Result};
 use crate::join::{clean, join_impl};
+use crate::kind::{Kind, Scope};
 use crate::platform::Layout;
 use crate::{ops, os, rules};
-
-/// Who an application's directories belong to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Scope {
-    /// The current user only, under their home directory. The right
-    /// choice for desktop apps and CLI tools. Needs no special privileges.
-    User,
-    /// The whole machine (`/var/lib`, `/etc`, `/Library`, `%ProgramData%`).
-    /// The right choice for services and daemons. Creating these
-    /// directories usually needs administrator or root privileges.
-    Global,
-    /// Everything under one caller-chosen folder, such as the directory
-    /// next to the executable. For portable installs, development
-    /// sandboxes, and tests.
-    Portable,
-}
-
-impl fmt::Display for Scope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::User => "user",
-            Self::Global => "global",
-            Self::Portable => "portable",
-        })
-    }
-}
-
-/// A kind of application directory.
-///
-/// Every kind resolves to a different directory, so clearing one (say,
-/// the cache) can never wipe another wholesale. Some kinds nest inside
-/// [`Kind::Data`] on platforms that have no separate location for them;
-/// the per-platform tables are in the crate documentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Kind {
-    /// Persistent application data: databases, user content, indexes.
-    /// Back this up.
-    Data,
-    /// Configuration files the user or an administrator may edit.
-    Config,
-    /// Data that can be regenerated. Safe to delete at any time.
-    Cache,
-    /// Log files.
-    Logs,
-    /// State that should survive restarts but is not worth backing up:
-    /// history, recently-used lists, window positions.
-    State,
-    /// Sockets, PID files, and locks that only matter while running.
-    Runtime,
-    /// Private scratch space for the application.
-    Temp,
-    /// Files the user is meant to see and open, inside their documents.
-    Documents,
-}
-
-impl Kind {
-    /// Every kind, in declaration order.
-    pub const ALL: [Self; 8] = [
-        Self::Data,
-        Self::Config,
-        Self::Cache,
-        Self::Logs,
-        Self::State,
-        Self::Runtime,
-        Self::Temp,
-        Self::Documents,
-    ];
-
-    /// A short lowercase name, such as `"data"` or `"logs"`.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Data => "data",
-            Self::Config => "config",
-            Self::Cache => "cache",
-            Self::Logs => "logs",
-            Self::State => "state",
-            Self::Runtime => "runtime",
-            Self::Temp => "temp",
-            Self::Documents => "documents",
-        }
-    }
-}
-
-impl fmt::Display for Kind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
 
 /// The directories of one application, for one [`Scope`].
 ///
@@ -236,11 +149,179 @@ impl App {
         Ok(Self::build(name, Scope::Portable, Layout::under(&root)))
     }
 
+    /// Portable directories next to the executable when a
+    /// [`PORTABLE_MARKER`] file (`.portable`) sits beside it, otherwise
+    /// per-user directories as with [`App::new`].
+    ///
+    /// This is the usual "portable build" switch: ship the same binary in
+    /// an installer and in a zip, and put an empty `.portable` file in the
+    /// zip. The marker is checked once, here.
+    ///
+    /// # Errors
+    ///
+    /// As for [`App::new`] or [`App::portable`], whichever applies.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use path_lib::{App, Scope};
+    ///
+    /// let app = App::auto("HiveDB")?;
+    /// assert!(matches!(app.scope(), Scope::User | Scope::Portable));
+    /// # Ok::<(), path_lib::Error>(())
+    /// ```
+    pub fn auto(name: impl AsRef<str>) -> Result<Self> {
+        let name = name.as_ref();
+        match os::exe_dir() {
+            Ok(dir) => Self::auto_in(name, dir),
+            Err(_) => Self::new(name),
+        }
+    }
+
+    /// [`App::auto`] with an explicit directory to look for the marker in.
+    fn auto_in(name: &str, exe_dir: &Path) -> Result<Self> {
+        if std::fs::symlink_metadata(exe_dir.join(PORTABLE_MARKER)).is_ok() {
+            Self::portable(name, exe_dir)
+        } else {
+            Self::new(name)
+        }
+    }
+
     fn build(name: &str, scope: Scope, layout: Layout) -> Self {
         Self {
             name: name.into(),
             scope,
             layout,
+        }
+    }
+
+    /// Replaces the directory for one kind.
+    ///
+    /// Use it to put data on a mounted volume, logs under `/var/log/...`
+    /// for a user-scoped tool, and so on. The path must be absolute and is
+    /// cleaned; it is not created until [`ensure`](App::ensure) or
+    /// [`create`](App::create).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPath`] when `dir` is empty ([`Reason::Empty`]),
+    /// relative ([`Reason::NotAbsolute`]), or already the directory of
+    /// another kind ([`Reason::SharedDir`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use path_lib::{App, Kind};
+    ///
+    /// let data = std::env::temp_dir().join("hivedb-data");
+    /// let app = App::new("HiveDB")?.with_dir(Kind::Data, &data)?;
+    /// assert_eq!(app.data(), path_lib::clean(&data));
+    /// # Ok::<(), path_lib::Error>(())
+    /// ```
+    pub fn with_dir(mut self, kind: Kind, dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let checked = self
+            .check_override(kind, dir)
+            .map_err(|reason| Error::invalid_path(&dir.to_string_lossy(), reason))?;
+        *self.dir_mut(kind) = checked;
+        Ok(self)
+    }
+
+    /// Validates a directory override and returns it cleaned.
+    fn check_override(&self, kind: Kind, dir: &Path) -> std::result::Result<PathBuf, Reason> {
+        if dir.as_os_str().is_empty() {
+            return Err(Reason::Empty);
+        }
+        if !dir.is_absolute() {
+            return Err(Reason::NotAbsolute);
+        }
+        let dir = clean(dir);
+        if Kind::ALL
+            .iter()
+            .any(|other| *other != kind && self.dir(*other) == dir)
+        {
+            return Err(Reason::SharedDir);
+        }
+        Ok(dir)
+    }
+
+    /// Applies directory overrides from environment variables named
+    /// `<PREFIX>_<KIND>_DIR`, such as `HIVEDB_DATA_DIR` or
+    /// `HIVEDB_LOGS_DIR` (see [`Kind::env_name`]).
+    ///
+    /// Unset and empty variables leave the directory unchanged; every
+    /// other value goes through [`with_dir`](App::with_dir). This is the
+    /// conventional way to relocate a service's directories in containers
+    /// and service managers without code changes.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidName`] when `prefix` is empty, starts with a
+    ///   digit, or has characters other than ASCII letters, digits, and
+    ///   `_`.
+    /// - [`Error::InvalidPath`] when a variable holds a relative path or a
+    ///   directory already used by another kind. The error's `path` shows
+    ///   `NAME=value`, so the offending variable is easy to find.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // With HIVEDB_DATA_DIR=/srv/hivedb set, data moves there.
+    /// let app = path_lib::App::global("HiveDB")?.with_env("HIVEDB")?;
+    /// # let _ = app;
+    /// # Ok::<(), path_lib::Error>(())
+    /// ```
+    pub fn with_env(self, prefix: impl AsRef<str>) -> Result<Self> {
+        self.with_env_from(prefix.as_ref(), &|key| std::env::var_os(key))
+    }
+
+    /// [`App::with_env`] with an injectable environment, for tests.
+    fn with_env_from(
+        mut self,
+        prefix: &str,
+        env: &dyn Fn(&str) -> Option<OsString>,
+    ) -> Result<Self> {
+        validate_env_prefix(prefix)?;
+        for kind in Kind::ALL {
+            let key = format!("{prefix}_{}_DIR", kind.env_name());
+            let Some(value) = env(&key).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            let checked = self
+                .check_override(kind, Path::new(&value))
+                .map_err(|reason| {
+                    Error::invalid_path(&format!("{key}={}", Path::new(&value).display()), reason)
+                })?;
+            *self.dir_mut(kind) = checked;
+        }
+        Ok(self)
+    }
+
+    /// Every kind with its directory, in [`Kind::ALL`] order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let app = path_lib::App::new("HiveDB")?;
+    /// for (kind, dir) in app.dirs() {
+    ///     assert_eq!(app.dir(kind), dir);
+    /// }
+    /// # Ok::<(), path_lib::Error>(())
+    /// ```
+    pub fn dirs(&self) -> impl Iterator<Item = (Kind, &Path)> + '_ {
+        Kind::ALL.iter().map(move |kind| (*kind, self.dir(*kind)))
+    }
+
+    fn dir_mut(&mut self, kind: Kind) -> &mut PathBuf {
+        match kind {
+            Kind::Data => &mut self.layout.data,
+            Kind::Config => &mut self.layout.config,
+            Kind::Cache => &mut self.layout.cache,
+            Kind::Logs => &mut self.layout.logs,
+            Kind::State => &mut self.layout.state,
+            Kind::Runtime => &mut self.layout.runtime,
+            Kind::Temp => &mut self.layout.temp,
+            Kind::Documents => &mut self.layout.documents,
         }
     }
 
@@ -406,6 +487,30 @@ impl fmt::Display for App {
     }
 }
 
+/// Name of the marker file that switches [`App::auto`] to portable mode.
+pub const PORTABLE_MARKER: &str = ".portable";
+
+/// Environment-variable prefixes: ASCII letters, digits, and `_`, not
+/// starting with a digit, so `<PREFIX>_DATA_DIR` is a portable variable
+/// name in every shell and service manager.
+fn validate_env_prefix(prefix: &str) -> Result<()> {
+    let mut chars = prefix.chars();
+    match chars.next() {
+        None => return Err(Error::invalid_name(prefix, Reason::Empty)),
+        Some(c) if c.is_ascii_digit() => {
+            return Err(Error::invalid_name(prefix, Reason::ReservedChar(c)));
+        }
+        Some(_) => {}
+    }
+    if let Some(bad) = prefix
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
+    {
+        return Err(Error::invalid_name(prefix, Reason::ReservedChar(bad)));
+    }
+    Ok(())
+}
+
 /// Application names become a directory name on every platform, so they
 /// follow the single-segment rules, plus the first-segment rules of
 /// [`crate::join`] (no `~`, no drive letter).
@@ -449,14 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kind_all_is_complete_and_named() {
-        assert_eq!(Kind::ALL.len(), 8);
-        for k in Kind::ALL {
-            assert_eq!(k.to_string(), k.name());
-        }
-    }
-
-    #[test]
     fn test_portable_layout_and_accessors_agree() {
         let root = std::env::temp_dir().join("path-lib-unit-portable");
         let app = App::portable("Unit", &root).unwrap();
@@ -468,6 +565,140 @@ mod tests {
         }
         assert_eq!(app.data(), app.dir(Kind::Data));
         assert_eq!(app.logs_at("x").unwrap(), app.logs().join("x"));
+    }
+
+    fn sandbox_app() -> App {
+        App::portable("Unit", std::env::temp_dir().join("path-lib-unit-overrides")).unwrap()
+    }
+
+    fn abs(name: &str) -> PathBuf {
+        std::env::temp_dir().join("path-lib-unit-abs").join(name)
+    }
+
+    #[test]
+    fn test_with_dir_replaces_one_kind_cleaned() {
+        let target = abs("data");
+        let raw = format!("{}{}.", target.display(), std::path::MAIN_SEPARATOR);
+        let app = sandbox_app().with_dir(Kind::Data, &raw).unwrap();
+        assert_eq!(app.data(), target);
+        assert_eq!(app.data_at("x").unwrap(), target.join("x"));
+        assert_ne!(app.config(), target);
+    }
+
+    #[test]
+    fn test_with_dir_rejects_empty_relative_and_shared() {
+        let err = |r: Result<App>| r.err().and_then(|e| e.reason());
+        assert_eq!(
+            err(sandbox_app().with_dir(Kind::Data, "")),
+            Some(Reason::Empty)
+        );
+        assert_eq!(
+            err(sandbox_app().with_dir(Kind::Data, "relative/dir")),
+            Some(Reason::NotAbsolute)
+        );
+        let app = sandbox_app();
+        let cache = app.cache().to_path_buf();
+        assert_eq!(
+            err(app.with_dir(Kind::Data, cache)),
+            Some(Reason::SharedDir)
+        );
+    }
+
+    #[test]
+    fn test_with_dir_same_kind_same_path_is_allowed() {
+        let app = sandbox_app();
+        let data = app.data().to_path_buf();
+        assert_eq!(app.with_dir(Kind::Data, &data).unwrap().data(), data);
+    }
+
+    fn env_of(pairs: Vec<(String, OsString)>) -> impl Fn(&str) -> Option<OsString> {
+        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    #[test]
+    fn test_with_env_applies_set_variables_only() {
+        let env = env_of(vec![
+            ("APP_DATA_DIR".into(), abs("d").into_os_string()),
+            ("APP_LOGS_DIR".into(), abs("l").into_os_string()),
+            ("APP_CACHE_DIR".into(), OsString::new()),
+        ]);
+        let base = sandbox_app();
+        let cache = base.cache().to_path_buf();
+        let app = base.with_env_from("APP", &env).unwrap();
+        assert_eq!(app.data(), abs("d"));
+        assert_eq!(app.logs(), abs("l"));
+        assert_eq!(app.cache(), cache, "empty value leaves the default");
+    }
+
+    #[test]
+    fn test_with_env_can_override_every_kind() {
+        let pairs: Vec<(String, OsString)> = Kind::ALL
+            .iter()
+            .map(|k| {
+                (
+                    format!("ALL_{}_DIR", k.env_name()),
+                    abs(k.name()).into_os_string(),
+                )
+            })
+            .collect();
+        let app = sandbox_app().with_env_from("ALL", &env_of(pairs)).unwrap();
+        for kind in Kind::ALL {
+            assert_eq!(app.dir(kind), abs(kind.name()), "{kind}");
+        }
+    }
+
+    #[test]
+    fn test_dir_mode_by_scope() {
+        let mut app = sandbox_app();
+        assert_eq!(app.dir_mode(), 0o700);
+        app.scope = Scope::Global;
+        assert_eq!(app.dir_mode(), 0o755);
+        app.scope = Scope::User;
+        assert_eq!(app.dir_mode(), 0o700);
+    }
+
+    #[test]
+    fn test_with_env_reports_variable_name_on_bad_value() {
+        let env = env_of(vec![("APP_STATE_DIR".into(), "rel".into())]);
+        let err = sandbox_app().with_env_from("APP", &env).unwrap_err();
+        assert_eq!(err.reason(), Some(Reason::NotAbsolute));
+        assert!(err.to_string().contains("APP_STATE_DIR=rel"), "{err}");
+    }
+
+    #[test]
+    fn test_with_env_validates_prefix() {
+        let none = |_: &str| None;
+        for bad in ["", "1APP", "APP-X", "APP X", "ÄPP"] {
+            assert!(
+                matches!(
+                    sandbox_app().with_env_from(bad, &none),
+                    Err(Error::InvalidName { .. })
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(sandbox_app().with_env_from("_APP_2", &none).is_ok());
+    }
+
+    #[test]
+    fn test_auto_in_switches_on_marker() {
+        let dir = std::env::temp_dir().join(format!("path-lib-unit-auto-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let without = App::auto_in("Unit", &dir).unwrap();
+        assert_eq!(without.scope(), Scope::User);
+        std::fs::write(dir.join(PORTABLE_MARKER), b"").unwrap();
+        let with = App::auto_in("Unit", &dir).unwrap();
+        assert_eq!(with.scope(), Scope::Portable);
+        assert!(with.data().starts_with(clean(&dir)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_dirs_iterates_every_kind_in_order() {
+        let app = sandbox_app();
+        let kinds: Vec<Kind> = app.dirs().map(|(k, _)| k).collect();
+        assert_eq!(kinds, Kind::ALL);
+        assert!(app.dirs().all(|(k, d)| app.dir(k) == d));
     }
 
     #[test]

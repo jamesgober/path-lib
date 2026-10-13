@@ -10,6 +10,8 @@
         <span>&nbsp;&mdash;&nbsp;</span>
         <a href="./PERFORMANCE.md" title="Performance"><b>PERFORMANCE</b></a>
         <span>&nbsp;&mdash;&nbsp;</span>
+        <a href="./STABILITY-1.0.md" title="Stability Contract"><b>STABILITY</b></a>
+        <span>&nbsp;&mdash;&nbsp;</span>
         <span>GUIDELINES</span>
     </sup>
 </div>
@@ -40,4 +42,5 @@ This document describes the engineering standards this project is built to. [REP
 2. `cargo clippy --all-targets --all-features -- -D warnings` is clean, also with `--target` set to a macOS and a Linux triple.
 3. `cargo test --all-features` passes.
 4. New public items include documentation and examples.
-5. A change to any directory table updates the tables in `src/lib.rs`, `docs/API.md`, and the platform module together.
+5. A change to any directory table updates the tables in `src/lib.rs`, `docs/API.md`, and the platform module together. The tables are part of the [1.x stability contract](./STABILITY-1.0.md), so changing a default directory requires a major version.
+6. A change to the public API is checked against the [stability contract](./STABILITY-1.0.md) before it is merged.

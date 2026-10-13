@@ -140,6 +140,15 @@ pub enum Reason {
     TooDeep,
     /// A separator appeared where a single name is required.
     Separator,
+    /// An absolute path was required (for a directory override or an
+    /// environment variable) and a relative one was given.
+    NotAbsolute,
+    /// A directory override would make two kinds share one directory,
+    /// which would let clearing one kind wipe another.
+    SharedDir,
+    /// `~name` (another user's home directory) was used; only `~` for the
+    /// current user is supported.
+    OtherUser,
 }
 
 impl Error {
@@ -239,6 +248,9 @@ impl fmt::Display for Reason {
             Self::TooLong => f.write_str("is longer than 4096 bytes"),
             Self::TooDeep => f.write_str("has more than 128 segments"),
             Self::Separator => f.write_str("must be a single name without separators"),
+            Self::NotAbsolute => f.write_str("must be an absolute path"),
+            Self::SharedDir => f.write_str("is already the directory of another kind"),
+            Self::OtherUser => f.write_str("only `~` for the current user is supported"),
         }
     }
 }
@@ -293,6 +305,52 @@ mod tests {
     }
 
     #[test]
+    fn test_display_every_variant_names_its_subject() {
+        use std::path::Path;
+        let cases: [(Error, &str); 7] = [
+            (
+                Error::invalid_name("x/y", Reason::Separator),
+                "invalid application name",
+            ),
+            (
+                Error::invalid_path("../a", Reason::Traversal),
+                "invalid path",
+            ),
+            (Error::Unresolved { dir: "home" }, "home directory"),
+            (
+                Error::AlreadyExists {
+                    path: Path::new("p").into(),
+                },
+                "already exists",
+            ),
+            (
+                Error::NotFound {
+                    path: Path::new("p").into(),
+                },
+                "does not exist",
+            ),
+            (
+                Error::Refused {
+                    path: Path::new("p").into(),
+                    reason: "because",
+                },
+                "refused to act on p: because",
+            ),
+            (
+                Error::io("create file", "p", io::Error::other("boom")),
+                "cannot create file p: boom",
+            ),
+        ];
+        for (err, needle) in cases {
+            let shown = err.to_string();
+            assert!(
+                shown.contains(needle),
+                "{shown:?} should contain {needle:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_source_present_only_for_io() {
         use std::error::Error as _;
         let io = Error::io("read", "/x", io::Error::other("boom"));
@@ -316,6 +374,9 @@ mod tests {
             Reason::TooLong,
             Reason::TooDeep,
             Reason::Separator,
+            Reason::NotAbsolute,
+            Reason::SharedDir,
+            Reason::OtherUser,
         ];
         for r in all {
             assert!(!r.to_string().is_empty());

@@ -27,7 +27,11 @@
 </p>
 
 <p>
-    The file operations are deliberately conservative: nothing is ever overwritten, symbolic links are never followed while walking a tree, copies appear whole or not at all, and removing a filesystem root, the home directory, or a standard user folder is refused outright.
+    The file operations are deliberately conservative: nothing is ever overwritten, symbolic links are never followed while walking a tree, copies appear whole or not at all, and removing a filesystem root, the home directory, or a standard user folder is refused outright. The one exception is <code>write_atomic</code>, whose job is to replace a file, and which does it so that readers only ever see the old file or the complete new one.
+</p>
+
+<p>
+    The API is stable. Version 1.0 freezes the public items, the directory tables, and the guarantees above for every 1.x release; the terms are in the <a href="docs/STABILITY-1.0.md">stability contract</a>.
 </p>
 
 ## Features
@@ -35,8 +39,10 @@
 ### Application Directories
 - **Eight kinds** &mdash; data, config, cache, logs, state, runtime, temp, documents
 - **Three scopes** &mdash; `App::new` (this user), `App::global` (the machine), `App::portable` (one folder you choose)
+- **Portable detection** &mdash; `App::auto` switches to a portable layout when a `.portable` file sits next to the executable
+- **Overrides** &mdash; `with_dir` relocates one kind; `with_env("HIVEDB")` reads `HIVEDB_DATA_DIR`, `HIVEDB_LOGS_DIR`, and so on
 - **Native conventions** &mdash; XDG and FHS on Linux and BSD, the `Library` domains on macOS, Known Folders on Windows
-- **Distinct by construction** &mdash; no two kinds share a directory, so clearing the cache can never wipe data
+- **Distinct by construction** &mdash; no two kinds share a directory, so clearing the cache can never wipe data; overrides are checked too
 
 ### Hardened Sub-Paths
 - **Either slash style** &mdash; `"a/b"`, `"a\\b"`, `"/a//b/"` all mean the same thing and produce the platform separator
@@ -46,12 +52,14 @@
 ### OS Folders
 - **`home`, `documents`, `desktop`, `downloads`, `pictures`, `music`, `videos`** &mdash; redirect-aware
 - **`root`, `temp`, `exe`, `exe_dir`** &mdash; plus `os()`, a compile-time constant
+- **`expand_home`** &mdash; `~` and `~/rest` for paths read from configuration; `$VARS` are deliberately left alone
 - **Resolved once** &mdash; cached for the life of the process; later calls cost about a nanosecond
 
 ### Guarded File Operations
 - **`make_dir`, `make_file`, `exists`, `list`, `remove`, `copy`, `move_to`, `find`**
 - **Never overwrites**, **never follows links**, **refuses catastrophic deletes**
 - **Atomic copies** &mdash; staged under a temporary name, renamed into place when complete
+- **`write_atomic`** &mdash; replaces a file through a flushed temporary and a rename; keeps Unix permissions and symbolic links
 
 <hr>
 
@@ -59,7 +67,7 @@
 
 ```toml
 [dependencies]
-path-lib = "0.1"
+path-lib = "1.0"
 ```
 
 <hr>
@@ -69,10 +77,11 @@ path-lib = "0.1"
 ```rust
 use path_lib::{App, Kind};
 
-let app = App::new("HiveDB")?;
+// Per-user directories, relocatable with HIVEDB_DATA_DIR and friends.
+let app = App::new("HiveDB")?.with_env("HIVEDB")?;
 
 // Base directories, resolved once.
-println!("{}", app.data());     // ~/Library/Application Support/HiveDB on macOS
+println!("{}", app.data().display());     // ~/Library/Application Support/HiveDB on macOS
 
 // Hardened sub-paths: any slash style, always inside the base.
 let db = app.data_at("/big\\sloppy//floppy/")?;
@@ -81,9 +90,12 @@ assert!(app.data_at("../../etc/passwd").is_err());
 // Create on demand (0700 on Unix for user scope).
 let wal = app.create(Kind::Data, "db/wal")?;
 
+// Replace a file atomically: readers see the old or the new contents.
+path_lib::write_atomic(app.config_at("hivedb.toml")?, "port = 7000\n")?;
+
 // Machine-wide, for services.
 let svc = App::global("HiveDB")?;
-println!("{}", svc.config());   // /etc/HiveDB on Linux
+println!("{}", svc.config().display());   // /etc/HiveDB on Linux
 # Ok::<(), path_lib::Error>(())
 ```
 
@@ -124,6 +136,7 @@ let p = app.documents_at(&name)?;
 ## Documentation
 
 - [API reference](docs/API.md) &mdash; every public item, the directory tables, and the validation rules.
+- [Stability contract](docs/STABILITY-1.0.md) &mdash; what 1.x guarantees and what may still change.
 - [Performance](docs/PERFORMANCE.md) &mdash; benchmark methodology and results.
 - [Developer guidelines](docs/GUIDELINES.md) &mdash; the engineering bar this project is built to.
 - [Release notes](docs/release/) &mdash; what shipped, when, and why.

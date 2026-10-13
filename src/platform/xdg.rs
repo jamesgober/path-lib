@@ -271,6 +271,33 @@ mod tests {
     }
 
     #[test]
+    fn test_read_small_file_reads_bounded_utf8_only() {
+        let dir = std::env::temp_dir().join(format!("path-lib-xdg-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(fs::create_dir_all(&dir).is_ok());
+        let ok = dir.join("ok");
+        let big = dir.join("big");
+        let bin = dir.join("bin");
+        assert!(fs::write(&ok, "XDG_DOCUMENTS_DIR=\"$HOME/D\"").is_ok());
+        assert!(
+            fs::write(
+                &big,
+                vec![b'a'; usize::try_from(MAX_FILE_BYTES).unwrap_or(0) + 1]
+            )
+            .is_ok()
+        );
+        assert!(fs::write(&bin, [0xFF, 0xFE, 0x00]).is_ok());
+        assert_eq!(
+            read_small_file(&ok).as_deref(),
+            Some("XDG_DOCUMENTS_DIR=\"$HOME/D\"")
+        );
+        assert_eq!(read_small_file(&big), None, "oversized file ignored");
+        assert_eq!(read_small_file(&bin), None, "non-UTF-8 file ignored");
+        assert_eq!(read_small_file(&dir.join("missing")), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_system_layout_is_fhs() {
         let s = SystemBases::resolve(&|_: &str| None);
         let l = s.map(|s| s.layout("app")).ok();

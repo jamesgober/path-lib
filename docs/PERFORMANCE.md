@@ -10,12 +10,14 @@
         <span>&nbsp;&mdash;&nbsp;</span>
         <a href="./GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
         <span>&nbsp;&mdash;&nbsp;</span>
+        <a href="./STABILITY-1.0.md" title="Stability Contract"><b>STABILITY</b></a>
+        <span>&nbsp;&mdash;&nbsp;</span>
         <span>PERFORMANCE</span>
     </sup>
 </div>
 <br>
 
-> **Status:** Numbers below are the **0.1.0** baseline. Re-run the suite locally to compare on your hardware.
+> **Status:** Numbers below are the **1.0.0** baseline. They match the 0.1.0 run within noise. Re-run the suite locally to compare on your hardware.
 
 ## Methodology
 
@@ -30,7 +32,7 @@
 | Operation | Median |
 |---|---|
 | `home()` (after first call) | 0.94 ns |
-| `documents()` (after first call) | 1.03 ns |
+| `documents()` (after first call) | 1.04 ns |
 | `app.data()` | 0.23 ns |
 
 After the first call these are a `OnceLock` load and a field read.
@@ -39,13 +41,13 @@ After the first call these are a `OnceLock` load and a field read.
 
 | Operation | Median |
 |---|---|
-| `join(base, "db")` | 57 ns |
-| `join(base, "/big\\sloppy//floppy/nipple-slaps/")` | 139 ns |
-| `join(base, "données/résumé/名前")` | 119 ns |
-| `join(base, "a/b/../../etc/passwd")` (rejected) | 100 ns |
-| `app.data_at("db/main")` | 78 ns |
-| `sanitize("quarterly-report-2026.pdf")` | 44 ns |
-| `sanitize("Q3: <final>?.pdf\u{202e}. ")` | 41 ns |
+| `join(base, "db")` | 56.3 ns |
+| `join(base, "/big\\sloppy//floppy/nipple-slaps/")` | 141.4 ns |
+| `join(base, "données/résumé/名前")` | 115.7 ns |
+| `join(base, "a/b/../../etc/passwd")` (rejected) | 98.1 ns |
+| `app.data_at("db/main")` | 77.2 ns |
+| `sanitize("quarterly-report-2026.pdf")` | 44.7 ns |
+| `sanitize("Q3: <final>?.pdf\u{202e}. ")` | 41.5 ns |
 
 A successful join performs exactly one allocation, sized up front for the base plus the sub-path. ASCII segments are validated byte by byte; only non-ASCII segments decode characters. A rejected input pays for building the error, which copies a bounded preview of the input.
 
@@ -53,10 +55,14 @@ A successful join performs exactly one allocation, sized up front for the base p
 
 | Operation | Median |
 |---|---|
-| `App::new("HiveDB")` | 567 ns |
-| `App::global("HiveDB")` | 564 ns |
+| `App::new("HiveDB")` | 581 ns |
+| `App::global("HiveDB")` | 570 ns |
 
-Construction validates the name and builds eight `PathBuf`s from the cached bases. It is a one-time cost; keep the `App` and pass it around.
+Construction validates the name and builds eight `PathBuf`s from the cached bases. It is a one-time cost; keep the `App` and pass it around. `with_dir` and `with_env` run once after construction and are not benchmarked separately.
+
+### Atomic writes
+
+`write_atomic` is not benchmarked. Its cost is dominated by flushing to disk: `sync_all` on the new file and, on Unix, on its parent directory. That time depends on the storage device and filesystem, not on the crate, so a number measured on one machine would say nothing about another.
 
 ## Running the Benchmarks
 

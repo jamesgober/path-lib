@@ -407,3 +407,228 @@ fn test_copy_concurrently_to_distinct_targets() {
     }
     assert_eq!(sb.names("").len(), 9, "no staging leftovers");
 }
+
+// --- write_atomic -------------------------------------------------------
+
+#[test]
+fn test_write_atomic_creates_parents_and_replaces_contents() {
+    let sb = Sandbox::new("wa");
+    let f = sb.join("cfg/app.conf");
+    path_lib::write_atomic(&f, "one").unwrap();
+    path_lib::write_atomic(&f, b"two".as_slice()).unwrap();
+    assert_eq!(fs::read_to_string(&f).unwrap(), "two");
+    assert_eq!(sb.names("cfg"), ["app.conf"], "no staging leftovers");
+}
+
+#[test]
+fn test_write_atomic_empty_contents() {
+    let sb = Sandbox::new("wa-empty");
+    let f = sb.join("empty");
+    path_lib::write_atomic(&f, "").unwrap();
+    assert_eq!(fs::read(&f).unwrap().len(), 0);
+}
+
+#[test]
+fn test_write_atomic_refuses_directory_and_nameless_path() {
+    let sb = Sandbox::new("wa-dir");
+    path_lib::make_dir(sb.join("d")).unwrap();
+    assert!(matches!(
+        path_lib::write_atomic(sb.join("d"), "x"),
+        Err(Error::Refused { .. })
+    ));
+    assert!(matches!(
+        path_lib::write_atomic(sb.join(".."), "x"),
+        Err(Error::Refused { .. })
+    ));
+    assert!(sb.join("d").is_dir());
+}
+
+#[test]
+fn test_write_atomic_through_symlink_keeps_link() {
+    let sb = Sandbox::new("wa-link");
+    let real = sb.write("real.conf", "old");
+    let link = sb.join("link.conf");
+    if !symlink_file(&real, &link) {
+        return;
+    }
+    path_lib::write_atomic(&link, "new").unwrap();
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+}
+
+#[test]
+fn test_write_atomic_refuses_broken_symlink() {
+    let sb = Sandbox::new("wa-broken");
+    let link = sb.join("dangling");
+    if !symlink_file(&sb.join("missing"), &link) {
+        return;
+    }
+    assert!(matches!(
+        path_lib::write_atomic(&link, "x"),
+        Err(Error::Refused { .. })
+    ));
+}
+
+#[test]
+fn test_write_atomic_concurrent_writers_leave_one_complete_version() {
+    let sb = Sandbox::new("wa-race");
+    let f = sb.join("state");
+    let handles: Vec<_> = (0..8u8)
+        .map(|i| {
+            let f = f.clone();
+            std::thread::spawn(move || path_lib::write_atomic(&f, vec![i; 4096]))
+        })
+        .collect();
+    for h in handles {
+        // On Windows a rename can lose a race to another rename of the same
+        // target; that is reported, never a torn file.
+        let _ = h.join().unwrap();
+    }
+    let data = fs::read(&f).unwrap();
+    assert_eq!(data.len(), 4096);
+    assert!(data.iter().all(|b| *b == data[0]), "torn write");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_write_atomic_preserves_unix_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("wa-perm");
+    let f = sb.write("secret.env", "A=1");
+    fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
+    path_lib::write_atomic(&f, "A=2").unwrap();
+    let mode = fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+// --- Unix-only filesystem conditions -------------------------------------
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    // Root ignores permission bits, which makes "permission denied"
+    // conditions impossible to create; those tests are skipped then.
+    let probe = std::env::temp_dir().join(format!("path-lib-root-probe-{}", std::process::id()));
+    let _ = fs::create_dir_all(&probe);
+    let _ = fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o000));
+    let readable = fs::read_dir(&probe).is_ok();
+    let _ = fs::set_permissions(&probe, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let _ = fs::remove_dir_all(&probe);
+    readable
+}
+
+#[cfg(unix)]
+#[test]
+fn test_find_and_list_report_unreadable_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        return;
+    }
+    let sb = Sandbox::new("unreadable");
+    let _ = sb.write("open/a.txt", "");
+    let locked = sb.join("locked");
+    path_lib::make_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let find = path_lib::find(sb.path(), "*.txt");
+    let list = path_lib::list(&locked);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(find, Err(Error::Io { .. })), "{find:?}");
+    assert!(matches!(list, Err(Error::Io { .. })), "{list:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_copy_refuses_special_files() {
+    let sb = Sandbox::new("special");
+    path_lib::make_dir(sb.join("src")).unwrap();
+    let sock = sb.join("src/app.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    let r = path_lib::copy(sb.join("src"), sb.join("dst"));
+    assert!(matches!(r, Err(Error::Refused { .. })), "{r:?}");
+    assert!(!sb.join("dst").exists());
+    let direct = path_lib::copy(&sock, sb.join("sock-copy"));
+    assert!(matches!(direct, Err(Error::Refused { .. })), "{direct:?}");
+    // Special files are still found by name.
+    assert_eq!(path_lib::find(sb.path(), "*.sock").unwrap(), [sock]);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_make_dir_refuses_symlink_in_place_of_directory() {
+    let sb = Sandbox::new("mkdir-link");
+    path_lib::make_dir(sb.join("real")).unwrap();
+    assert!(symlink_dir(&sb.join("real"), &sb.join("link")));
+    assert!(matches!(
+        path_lib::make_dir(sb.join("link")),
+        Err(Error::Refused { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_remove_follows_no_links_to_protected_targets() {
+    // Removing a link that points at the home directory removes the link.
+    let sb = Sandbox::new("remove-home-link");
+    let link = sb.join("home-link");
+    assert!(symlink_dir(path_lib::home().unwrap(), &link));
+    assert!(path_lib::remove(&link).unwrap());
+    assert!(path_lib::home().unwrap().is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_operations_inside_untraversable_directory_report_io() {
+    use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        return;
+    }
+    let sb = Sandbox::new("untraversable");
+    let locked = sb.join("locked");
+    path_lib::make_dir(locked.join("inner")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let inner = locked.join("inner");
+    let results = [
+        ("make_dir", path_lib::make_dir(inner.join("x"))),
+        ("make_file", path_lib::make_file(inner.join("f"))),
+        ("remove", path_lib::remove(&inner).map(|_| ())),
+        ("write_atomic", path_lib::write_atomic(inner.join("w"), "x")),
+    ];
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    for (what, r) in results {
+        assert!(matches!(r, Err(Error::Io { .. })), "{what}: {r:?}");
+    }
+    // `exists` reports "maybe" (true) when it cannot tell.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let maybe = path_lib::exists(inner.join("anything"));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(maybe);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_make_file_in_read_only_directory_reports_io() {
+    use std::os::unix::fs::PermissionsExt;
+    if running_as_root() {
+        return;
+    }
+    let sb = Sandbox::new("readonly-dir");
+    let ro = sb.join("ro");
+    path_lib::make_dir(&ro).unwrap();
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
+    let r = path_lib::make_file(ro.join("f"));
+    fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(
+            r,
+            Err(Error::Io {
+                op: "create file",
+                ..
+            })
+        ),
+        "{r:?}"
+    );
+}

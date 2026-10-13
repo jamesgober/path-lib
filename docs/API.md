@@ -12,26 +12,33 @@
         <a href="./PERFORMANCE.md" title="Performance"><b>PERFORMANCE</b></a>
         <span>&nbsp;&mdash;&nbsp;</span>
         <a href="./GUIDELINES.md" title="Developer Guidelines"><b>GUIDELINES</b></a>
+        <span>&nbsp;&mdash;&nbsp;</span>
+        <a href="./STABILITY-1.0.md" title="Stability Contract"><b>STABILITY</b></a>
     </sup>
 </div>
 <br>
 
-> **Status:** This reference tracks the public surface of `path-lib` **0.1.0**.
+> **Status:** This reference tracks the public surface of `path-lib` **1.0.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
 
 ## Table of Contents
 
 - [App](#app)
   - [Constructors](#constructors)
+  - [Portable detection](#portable-detection)
+  - [Overrides](#overrides)
   - [Directories](#directories)
   - [Sub-paths](#sub-paths)
   - [Creating and managing](#creating-and-managing)
 - [Kind and Scope](#kind-and-scope)
 - [Directory Tables](#directory-tables)
 - [OS Folders](#os-folders)
+  - [`expand_home`](#expand_home)
 - [Path Helpers](#path-helpers)
 - [Validation Rules](#validation-rules)
 - [Filesystem Operations](#filesystem-operations)
+  - [`write_atomic`](#write_atomic)
 - [Errors](#errors)
+  - [Reasons](#reasons)
 - [Design Notes](#design-notes)
 
 <br>
@@ -47,6 +54,7 @@
 | `App::new(name)` | Current user | Name invalid; home directory unknown |
 | `App::global(name)` | Whole machine | Name invalid; on Windows, `%ProgramData%` unknown |
 | `App::portable(name, root)` | Everything under `root` | Name invalid; `root` empty |
+| `App::auto(name)` | Portable beside the executable, or current user | As for `portable` or `new` |
 
 The name becomes a directory name, so it follows the single-segment [validation rules](#validation-rules) and may not start with `~`. It is used exactly as given; `App::new("HiveDB")` produces `HiveDB` directories on every platform.
 
@@ -61,6 +69,40 @@ let port = App::portable("HiveDB", path_lib::exe_dir()?)?;
 
 `App::portable` lays out `root/data`, `root/config`, `root/cache`, `root/logs`, `root/state`, `root/run`, `root/temp`, and `root/documents`. A relative `root` is pinned to the current directory at construction.
 
+### Portable detection
+
+```rust
+use path_lib::{App, Scope};
+
+let app = App::auto("HiveDB")?;
+assert!(matches!(app.scope(), Scope::User | Scope::Portable));
+# Ok::<(), path_lib::Error>(())
+```
+
+`App::auto` returns `App::portable(name, exe_dir())` when an entry named `PORTABLE_MARKER` (`.portable`) exists in the executable's directory, and `App::new(name)` otherwise, including when the executable's directory cannot be determined. Ship the same binary in an installer and in a zip, and put an empty `.portable` file in the zip. The marker is checked once, at construction; creating or deleting it later does not affect an existing `App`.
+
+### Overrides
+
+```rust
+use path_lib::{App, Kind};
+
+let data = std::env::temp_dir().join("hivedb-data");
+let app = App::new("HiveDB")?
+    .with_dir(Kind::Data, &data)?    // explicit
+    .with_env("HIVEDB")?;            // HIVEDB_DATA_DIR, HIVEDB_LOGS_DIR, ...
+# let _ = app;
+# Ok::<(), path_lib::Error>(())
+```
+
+| Method | Does | Fails with `InvalidPath` and |
+|---|---|---|
+| `with_dir(kind, dir)` | Replaces one kind's directory | `Reason::Empty`, `Reason::NotAbsolute`, or `Reason::SharedDir` |
+| `with_env(prefix)` | Applies `<PREFIX>_<KIND>_DIR` for every kind | `Reason::NotAbsolute` or `Reason::SharedDir` |
+
+Both take and return the `App` by value, so they chain after any constructor. The new directory must be absolute; it is cleaned, and it is not created until `ensure` or `create`. An override that would equal the directory of another kind is rejected with `Reason::SharedDir`, which keeps every kind distinct. Setting a kind to its current directory is allowed.
+
+`with_env` reads one variable per kind, named with [`Kind::env_name`](#kind-and-scope). With the prefix `HIVEDB` these are `HIVEDB_DATA_DIR`, `HIVEDB_CONFIG_DIR`, `HIVEDB_CACHE_DIR`, `HIVEDB_LOGS_DIR`, `HIVEDB_STATE_DIR`, `HIVEDB_RUNTIME_DIR`, `HIVEDB_TEMP_DIR`, and `HIVEDB_DOCUMENTS_DIR`. Unset and empty variables leave the directory unchanged. Other values go through the same checks as `with_dir`, in `Kind::ALL` order, and an error's `path` reads `NAME=value` so the offending variable is easy to find. The prefix must be non-empty ASCII letters, digits, and `_`, not starting with a digit; otherwise `with_env` fails with `InvalidName`.
+
 ### Directories
 
 ```rust
@@ -71,7 +113,15 @@ let same = app.dir(path_lib::Kind::Data);
 # Ok::<(), path_lib::Error>(())
 ```
 
-`data()`, `config()`, `cache()`, `logs()`, `state()`, `runtime()`, `temp()`, `documents()`, and `dir(kind)` return `&Path`. `name()` and `scope()` return what the `App` was built with. `Display` prints a table of every directory.
+`data()`, `config()`, `cache()`, `logs()`, `state()`, `runtime()`, `temp()`, `documents()`, and `dir(kind)` return `&Path`. `dirs()` iterates `(Kind, &Path)` pairs in `Kind::ALL` order. `name()` and `scope()` return what the `App` was built with. `Display` prints a table of every directory.
+
+```rust
+# let app = path_lib::App::new("HiveDB")?;
+for (kind, dir) in app.dirs() {
+    println!("{kind:<9} {}", dir.display());
+}
+# Ok::<(), path_lib::Error>(())
+```
 
 ### Sub-paths
 
@@ -113,9 +163,22 @@ On Unix, `ensure` and `create` create user and portable directories with mode `0
 | `Temp` | Private scratch space |
 | `Documents` | Files the user is meant to open, inside their documents folder |
 
-`Kind::ALL` lists every kind; `kind.name()` gives `"data"`, `"config"`, and so on.
+`Kind::ALL` lists every kind; `kind.name()` gives `"data"`, `"config"`, and so on, and `kind.env_name()` gives the upper-case suffix used by [`with_env`](#overrides): `DATA`, `CONFIG`, `CACHE`, `LOGS`, `STATE`, `RUNTIME`, `TEMP`, or `DOCUMENTS`.
 
 `Scope` is `User`, `Global`, or `Portable`.
+
+Both enums are `#[non_exhaustive]`, so a kind or scope can be added in a minor release. Match on them with a wildcard arm, or iterate `Kind::ALL`:
+
+```rust
+use path_lib::Kind;
+
+fn backed_up(kind: Kind) -> bool {
+    match kind {
+        Kind::Data | Kind::Config | Kind::Documents => true,
+        _ => false,
+    }
+}
+```
 
 <br>
 
@@ -178,6 +241,25 @@ Folders come from `SHGetKnownFolderPath`, so redirected folders (OneDrive backup
 | `os()` | `Os` (compile-time constant) | Never |
 
 Values are resolved on first use and cached for the life of the process. User folders and machine folders are cached separately, so a process without a home directory can still use global paths. On Linux, the user folders follow `user-dirs.dirs` (including localised names such as `~/Dokumente`).
+
+### `expand_home`
+
+```rust
+let home = path_lib::home()?;
+assert_eq!(path_lib::expand_home("~/data")?, home.join("data"));
+assert_eq!(path_lib::expand_home("/var/lib/x")?, std::path::Path::new("/var/lib/x"));
+assert!(path_lib::expand_home("~root/x").is_err());
+# Ok::<(), path_lib::Error>(())
+```
+
+| Input | Result |
+|---|---|
+| `~` | `home()` |
+| `~/rest` (also `~\rest` on Windows) | `home()` joined with `rest`, cleaned |
+| `~name` | `InvalidPath` with `Reason::OtherUser` |
+| Anything not starting with `~` | Returned unchanged |
+
+Use it on paths read from configuration files and environment variables, such as values passed to [`with_dir`](#overrides). It fails with `Unresolved` only when the input starts with `~` and there is no home directory. `$VAR` and `%VAR%` are deliberately not expanded: expanding them would let a configuration value pull arbitrary environment state into a path.
 
 <br>
 
@@ -247,16 +329,40 @@ Every rule applies on every platform, so a path accepted on Linux is also valid 
 | `copy(from, to)` | File or tree; returns bytes copied; never overwrites |
 | `move_to(from, to)` | Atomic rename, or copy then delete across volumes |
 | `find(root, pattern)` | Recursive name search with `*` and `?`; sorted |
+| `write_atomic(path, contents)` | Replaces a file's contents atomically; creates the file and its parents if missing |
 
 Guarantees:
 
-- **No overwrites.** Copy, move, and file creation fail with `AlreadyExists`.
+- **No overwrites.** Copy, move, and file creation fail with `AlreadyExists`. [`write_atomic`](#write_atomic) is the deliberate exception: replacing a file is its purpose.
 - **No link following.** `remove` deletes a link, never its target. `find` lists links but does not descend into them. `copy` refuses trees containing links or special files.
 - **Protected paths.** `remove` and `move_to` refuse filesystem roots, top-level directories (`/usr`, `C:\Users`), the home directory and its parents, the user's standard folders, and the OS temp directory. Checks compare case-insensitively on Windows and macOS and are repeated on the symlink-resolved form.
 - **Atomic copies.** A copy is built under a hidden sibling name and renamed into place only when complete; on failure the partial copy is deleted.
 - **Bounded walks.** Trees deeper than `MAX_WALK_DEPTH` (256) are refused; walks are iterative, so depth never threatens the stack. Pattern matching is linear-time.
 
 Checks and actions are separate system calls, so another process can change the filesystem between them. The guards prevent mistakes, not a hostile process racing this one in the same directory.
+
+`move_to` renames when source and destination are on the same volume. Across volumes it copies, then removes the source. If the copy succeeded but removing the source failed, the error is `Io` with `op` set to `"remove moved source"`: the destination is complete, and the source may be partly deleted, because a directory's contents can be removed before the directory itself fails. Treat the destination as the surviving version.
+
+### `write_atomic`
+
+```rust
+let dir = std::env::temp_dir().join("path-lib-api-write-atomic");
+let file = dir.join("app.conf");
+path_lib::write_atomic(&file, "port = 7000\n")?;
+path_lib::write_atomic(&file, "port = 7001\n")?;
+assert_eq!(std::fs::read_to_string(&file).unwrap(), "port = 7001\n");
+# path_lib::remove(&dir)?;
+# Ok::<(), path_lib::Error>(())
+```
+
+The contents are written to a hidden temporary sibling, flushed to disk with `sync_all`, and renamed over `path`. A reader sees either the old file or the complete new one, never a partial write, even if the process or machine fails midway. On Unix the parent directory is flushed after the rename, so the rename itself survives a power loss. Missing parent directories are created.
+
+- **Permissions.** On Unix an existing file's permission bits are copied to the new file, so a `0600` file stays `0600`. A new file gets the process default. On Windows the file inherits the directory's access control list.
+- **Symbolic links.** If `path` is a link, the file it points to is replaced and the link is kept.
+- **Refused.** A directory, a broken symbolic link, or a path without a file name fails with `Refused`.
+- **Failure.** On any error the temporary file is removed and the original file is untouched.
+
+It is the one operation in the crate whose purpose is to overwrite. Use it for configuration, state, and other files that must never be seen half-written.
 
 <br>
 
@@ -274,7 +380,20 @@ All fallible functions return `path_lib::Result<T>`.
 | `Refused { path, reason }` | A guard blocked a dangerous operation | Nothing was changed; reconsider the operation |
 | `Io { op, path, source }` | The OS reported an error | Usually permissions or disk space |
 
-`error.reason()` returns the `Reason` for input errors. Caller input echoed in an error is truncated to 96 characters and printed with escapes.
+`error.reason()` returns the `Reason` for input errors. Caller input echoed in an error is truncated to 96 characters (`PREVIEW_CHARS`) and printed with escapes. `Error` is `#[non_exhaustive]`.
+
+### Reasons
+
+The [validation rules](#validation-rules) list the reasons `join` and the `*_at` accessors produce. The others are:
+
+| `Reason` | Raised by |
+|---|---|
+| `Empty` | An empty app name, `App::portable` root, `with_dir` directory, or `with_env` prefix |
+| `NotAbsolute` | `with_dir`, or a `with_env` variable, given a relative path |
+| `SharedDir` | `with_dir` or `with_env` would give two kinds the same directory |
+| `OtherUser` | `expand_home` given `~name` |
+
+`Reason` is `#[non_exhaustive]`; new reasons may be added in minor releases.
 
 <br>
 
