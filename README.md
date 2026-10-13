@@ -126,6 +126,7 @@ let p = app.documents_at(&name)?;
 - [API reference](docs/API.md) &mdash; every public item, the directory tables, and the validation rules.
 - [Performance](docs/PERFORMANCE.md) &mdash; benchmark methodology and results.
 - [Developer guidelines](docs/GUIDELINES.md) &mdash; the engineering bar this project is built to.
+- [Release notes](docs/release/) &mdash; what shipped, when, and why.
 
 <br>
 
