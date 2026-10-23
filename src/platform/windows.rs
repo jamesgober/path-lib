@@ -690,10 +690,39 @@ mod private_dir {
                 )
             };
             assert_eq!(status, 0, "GetNamedSecurityInfoW failed");
+            let text = dacl_string(descriptor);
+            // SAFETY: allocated by the system with `LocalAlloc`.
+            let _freed = unsafe { LocalFree(descriptor) };
+            text
+        }
+
+        /// The DACL part of `sddl` as the system writes it back: SIDs with
+        /// a well-known short name (`LA` for the built-in Administrator,
+        /// for example) come back as that name.
+        pub(crate) fn canonical(sddl: &str) -> String {
+            let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+            let mut descriptor: *mut c_void = std::ptr::null_mut();
+            // SAFETY: as in `create`.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide.as_ptr(),
+                    SDDL_REVISION_1,
+                    &raw mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(ok, 0);
+            let text = dacl_string(descriptor);
+            // SAFETY: allocated by the conversion with `LocalAlloc`.
+            let _freed = unsafe { LocalFree(descriptor) };
+            text
+        }
+
+        fn dacl_string(descriptor: *mut c_void) -> String {
             let mut string: *mut u16 = std::ptr::null_mut();
             let mut length = 0u32;
-            // SAFETY: `descriptor` came from the call above; `string` and
-            // `length` are valid out-pointers.
+            // SAFETY: `descriptor` is a valid security descriptor owned by
+            // the caller; `string` and `length` are valid out-pointers.
             let ok = unsafe {
                 ConvertSecurityDescriptorToStringSecurityDescriptorW(
                     descriptor,
@@ -709,10 +738,8 @@ mod private_dir {
             let text = String::from_utf16_lossy(units)
                 .trim_end_matches('\0')
                 .to_owned();
-            // SAFETY: both were allocated by the system with `LocalAlloc`.
+            // SAFETY: allocated by the system with `LocalAlloc`.
             let _freed = unsafe { LocalFree(string.cast::<c_void>()) };
-            // SAFETY: as above.
-            let _freed = unsafe { LocalFree(descriptor) };
             text
         }
 
@@ -735,13 +762,12 @@ mod private_dir {
             drop(std::fs::remove_dir_all(&dir));
             create(&dir).unwrap();
             let dacl = dacl_of(&dir);
-            let user = current_user_sid().unwrap();
+            let expected = canonical(&descriptor_for(&current_user_sid().unwrap()));
+            // Exactly the protected list we set: the user, SYSTEM, and
+            // Administrators, nothing inherited, nobody else.
+            assert_eq!(dacl, expected);
             assert!(dacl.starts_with("D:P"), "not protected: {dacl}");
-            assert!(dacl.contains(&user), "{dacl}");
-            assert!(dacl.contains(";;;SY)") && dacl.contains(";;;BA)"), "{dacl}");
-            for other in [";;;WD)", ";;;BU)", ";;;AU)", ";;;IU)"] {
-                assert!(!dacl.contains(other), "{other} in {dacl}");
-            }
+            assert_eq!(dacl.matches("(A;").count(), 3, "{dacl}");
             std::fs::remove_dir_all(&dir).unwrap();
         }
 
