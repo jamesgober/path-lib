@@ -432,6 +432,78 @@ impl App {
         Ok(path)
     }
 
+    /// Like [`ensure`](App::ensure), but every directory it creates is
+    /// private to the current user on every OS and in every scope: for
+    /// logs, audit records, crash reports, keys, and anything else other
+    /// users must not read.
+    ///
+    /// - **Unix:** mode `0700` (subject to the process umask), also in
+    ///   [`Scope::Global`].
+    /// - **Windows:** created with a protected access control list that
+    ///   grants full control to the current user, `SYSTEM`, and the
+    ///   `Administrators` group, and nothing else; inheritance from the
+    ///   parent is disabled, and files and directories created inside
+    ///   inherit the same list. The list is set when the directory is
+    ///   created, so it is never open, even briefly.
+    ///
+    /// Missing parents are created the same way. A directory that already
+    /// exists is left as it is. A symbolic link where the directory should
+    /// be is refused.
+    ///
+    /// # Errors
+    ///
+    /// As for [`ensure`](App::ensure).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use path_lib::{App, Kind};
+    ///
+    /// let root = std::env::temp_dir().join("path-lib-doc-ensure-private");
+    /// let app = App::portable("demo", &root)?;
+    /// let logs = app.ensure_private(Kind::Logs)?;
+    /// assert!(logs.is_dir());
+    /// #[cfg(unix)]
+    /// {
+    ///     use std::os::unix::fs::PermissionsExt;
+    ///     let mode = std::fs::metadata(logs)?.permissions().mode();
+    ///     assert_eq!(mode & 0o077, 0); // nobody but the owner
+    /// }
+    /// # path_lib::remove(&root)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn ensure_private(&self, kind: Kind) -> Result<&Path> {
+        let dir = self.dir(kind);
+        ops::create_private_dir(dir)?;
+        Ok(dir)
+    }
+
+    /// Like [`create`](App::create), with the permissions of
+    /// [`ensure_private`](App::ensure_private).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidPath`] for an unsafe `sub`, otherwise as for
+    /// [`ensure`](App::ensure).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use path_lib::{App, Kind};
+    ///
+    /// let root = std::env::temp_dir().join("path-lib-doc-create-private");
+    /// let app = App::portable("demo", &root)?;
+    /// let keys = app.create_private(Kind::Data, "keys")?;
+    /// assert!(keys.ends_with("keys") && keys.is_dir());
+    /// # path_lib::remove(&root)?;
+    /// # Ok::<(), path_lib::Error>(())
+    /// ```
+    pub fn create_private(&self, kind: Kind, sub: impl AsRef<str>) -> Result<PathBuf> {
+        let path = self.at(kind, sub)?;
+        ops::create_private_dir(&path)?;
+        Ok(path)
+    }
+
     /// Lists the entries of a sub-directory inside the directory for
     /// `kind`, sorted. An empty `sub` lists the base directory.
     ///
@@ -715,5 +787,95 @@ mod tests {
             assert!(text.contains(kind.name()));
         }
         assert!(!text.ends_with('\n'));
+    }
+
+    fn private_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir()
+            .join("path-lib-unit-private")
+            .join(format!("{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    #[test]
+    fn test_ensure_private_creates_missing_parents() {
+        let root = private_root("parents");
+        let app = App::portable("demo", &root).unwrap();
+        let logs = app.ensure_private(Kind::Logs).unwrap();
+        assert!(logs.is_dir());
+        // Idempotent: an existing directory is accepted as it is.
+        assert_eq!(app.ensure_private(Kind::Logs).unwrap(), logs);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_private_is_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = private_root("unix-mode");
+        let app = App::portable("demo", &root).unwrap();
+        let dir = app.create_private(Kind::Data, "keys/inner").unwrap();
+        for created in [dir.as_path(), dir.parent().unwrap(), root.as_path()] {
+            let mode = std::fs::metadata(created).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode & 0o077, 0, "{} has {mode:o}", created.display());
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_private_leaves_an_existing_directory_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = private_root("existing");
+        let app = App::portable("demo", &root).unwrap();
+        let dir = app.dir(Kind::Cache).to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _same = app.ensure_private(Kind::Cache).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_ensure_private_sets_a_protected_dacl_on_windows() {
+        let root = private_root("windows-dacl");
+        let app = App::portable("demo", &root).unwrap();
+        let dir = app.create_private(Kind::Data, "keys").unwrap();
+        for created in [dir.as_path(), dir.parent().unwrap()] {
+            let dacl = crate::platform::private_dir_dacl(created);
+            assert!(dacl.starts_with("D:P"), "{}: {dacl}", created.display());
+            assert!(
+                !dacl.contains(";;;BU)") && !dacl.contains(";;;WD)"),
+                "{dacl}"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_ensure_private_refuses_a_file_in_the_way() {
+        let root = private_root("file");
+        let app = App::portable("demo", &root).unwrap();
+        let dir = app.dir(Kind::State).to_path_buf();
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        std::fs::write(&dir, "not a directory").unwrap();
+        let err = app.ensure_private(Kind::State).unwrap_err();
+        assert!(matches!(err, Error::AlreadyExists { .. }), "{err:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_private_refuses_a_symlink() {
+        let root = private_root("symlink");
+        let app = App::portable("demo", &root).unwrap();
+        let target = root.join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, app.dir(Kind::Temp)).unwrap();
+        let err = app.ensure_private(Kind::Temp).unwrap_err();
+        assert!(matches!(err, Error::Refused { .. }), "{err:?}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

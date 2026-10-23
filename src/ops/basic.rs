@@ -58,6 +58,71 @@ pub(crate) fn create_dir(path: &Path, mode: Option<u32>) -> Result<()> {
         .map_err(|e| Error::io("create directory", path, e))
 }
 
+/// Creates a directory tree private to the current user: every directory
+/// it creates gets mode `0700` on Unix (subject to the process umask) and,
+/// on Windows, a protected access control list for the current user,
+/// `SYSTEM`, and `Administrators`. Existing directories are left alone.
+///
+/// The final path must not be a symbolic link; its parents may be (such as
+/// `/var` on macOS), because they already exist and are not created here.
+pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => return Ok(()),
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(Error::Refused {
+                path: path.to_path_buf(),
+                reason: "it is a symbolic link, not a directory",
+            });
+        }
+        Ok(_) => {
+            return Err(Error::AlreadyExists {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::io("inspect", path, e)),
+    }
+    // The missing directories, deepest first; stop at the first that exists.
+    let mut missing = Vec::new();
+    for dir in path.ancestors() {
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        match fs::metadata(dir) {
+            Ok(meta) if meta.is_dir() => break,
+            Ok(_) => {
+                return Err(Error::AlreadyExists {
+                    path: dir.to_path_buf(),
+                });
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(dir),
+            Err(e) => return Err(Error::io("inspect", dir, e)),
+        }
+    }
+    for dir in missing.iter().rev() {
+        match create_one_private(dir) {
+            Ok(()) => {}
+            // Another process created it first: fine, if it is a directory.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(e) => return Err(Error::io("create directory", dir, e)),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_one_private(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = fs::DirBuilder::new();
+    let _builder = builder.mode(0o700);
+    builder.create(dir)
+}
+
+#[cfg(windows)]
+fn create_one_private(dir: &Path) -> io::Result<()> {
+    crate::platform::create_private_dir(dir)
+}
+
 #[cfg(unix)]
 pub(super) fn apply_mode(builder: &mut fs::DirBuilder, mode: Option<u32>) {
     use std::os::unix::fs::DirBuilderExt;
