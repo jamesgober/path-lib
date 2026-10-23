@@ -18,7 +18,7 @@
 </div>
 <br>
 
-> **Status:** This reference tracks the public surface of `path-lib` **1.0.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
+> **Status:** This reference tracks the public surface of `path-lib` **1.1.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
 
 ## Table of Contents
 
@@ -142,11 +142,20 @@ assert_eq!(p, q);
 | `ensure(kind)` | Creates the kind's directory if missing; returns it |
 | `ensure_all()` | `ensure` for every kind |
 | `create(kind, sub)` | Validates `sub`, creates it with parents, returns the path |
+| `ensure_private(kind)` | Like `ensure`, but private to the current user on every OS (since 1.1) |
+| `create_private(kind, sub)` | Like `create`, with the permissions of `ensure_private` (since 1.1) |
 | `list(kind, sub)` | Sorted entries of a sub-directory |
 | `remove(kind, sub)` | Deletes a sub-path; empty `sub` clears the whole kind |
 | `find(kind, pattern)` | Name search under the kind's directory |
 
 On Unix, `ensure` and `create` create user and portable directories with mode `0700` and global ones with `0755`. Both refuse a symbolic link where the directory should be, so a link planted in a shared location cannot redirect the application's files.
+
+`ensure_private` and `create_private` (since 1.1) are for directories other users must not read, such as logs, audit records, crash reports, and keys, in every scope:
+
+- **Unix:** mode `0700` (subject to the umask), also for `Scope::Global`.
+- **Windows:** a protected access control list, set when the directory is created: full control for the current user, `SYSTEM`, and `Administrators`, nothing for anyone else, no inheritance from the parent, and inherited by everything created inside.
+
+Missing parents are created the same way; a directory that already exists is left as it is.
 
 <br>
 

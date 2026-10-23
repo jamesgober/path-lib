@@ -29,7 +29,7 @@ This document describes the engineering standards this project is built to. [REP
 ## Quality Bar
 
 - **Zero runtime dependencies.** `criterion` and `proptest` are dev-dependencies only.
-- **`unsafe` confined to one module.** The crate root denies `unsafe_code`; only the Windows Known Folder binding opts out, and every block there carries a `SAFETY` comment.
+- **`unsafe` confined to the Windows bindings.** The crate root denies `unsafe_code`; only the two Windows binding modules opt out (the Known Folder lookup, and the private-directory access control list since 1.1), and every block there carries a `SAFETY` comment.
 - **No panics in library code** &mdash; no `unwrap`, `expect`, `todo`, or `unimplemented`.
 - **Reject before building.** Input validation happens before any path is constructed; nothing is accepted and corrected afterwards. `sanitize` is the explicit, opt-in exception.
 - **Testable platform rules.** Every platform table resolves through an injected environment lookup, so its rules are unit-tested without touching the process environment.

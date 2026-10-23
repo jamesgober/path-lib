@@ -34,7 +34,7 @@ mod remove;
 mod transfer;
 mod write;
 
-pub(crate) use basic::create_dir;
+pub(crate) use basic::{create_dir, create_private_dir};
 pub use basic::{exists, list, make_dir, make_file};
 pub use find::find;
 pub use remove::remove;

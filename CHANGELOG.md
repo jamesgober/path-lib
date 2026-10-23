@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-10-23
+
+### Added
+
+- `App::ensure_private(kind)` and `App::create_private(kind, sub)`: like
+  `ensure` and `create`, but every directory they create is private to the
+  current user on every OS and in every scope. On Unix the mode is `0700`,
+  also for `Scope::Global`. On Windows the directory is created with a
+  protected access control list that grants full control to the current
+  user, `SYSTEM`, and `Administrators` and nothing to anyone else, with no
+  inheritance from the parent; files and directories created inside inherit
+  it. Missing parents are created the same way, existing directories are
+  left alone, and a symbolic link in place of the directory is refused.
+
+`ensure` and `create` are unchanged.
+
+---
+
 ## [1.0.0] - 2026-10-13
 
 Stable release. The public API is frozen for 1.x under
@@ -96,6 +114,7 @@ Initial release.
 - Unit, integration, and property tests; criterion benchmarks; CI for
   Linux, macOS, and Windows on stable and MSRV 1.85.
 
-[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/jamesgober/path-lib/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jamesgober/path-lib/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/jamesgober/path-lib/releases/tag/v0.1.0

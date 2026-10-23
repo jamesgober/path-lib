@@ -25,8 +25,10 @@ use crate::join::clean;
 
 #[cfg(windows)]
 mod windows;
+#[cfg(all(windows, test))]
+pub(crate) use windows::private_dir_dacl;
 #[cfg(windows)]
-pub(crate) use windows::{SystemBases, UserBases};
+pub(crate) use windows::{SystemBases, UserBases, create_private_dir};
 
 #[cfg(target_os = "macos")]
 mod macos;

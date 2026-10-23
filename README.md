@@ -67,7 +67,7 @@
 
 ```toml
 [dependencies]
-path-lib = "1.0"
+path-lib = "1.1"
 ```
 
 <hr>

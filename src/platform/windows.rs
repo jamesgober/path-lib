@@ -414,6 +414,385 @@ mod ffi {
     }
 }
 
+/// Creates one directory private to the current user (see
+/// [`App::ensure_private`](crate::App::ensure_private)).
+pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    private_dir::create(path)
+}
+
+/// The DACL of `path` in SDDL form, for tests.
+#[cfg(test)]
+pub(crate) fn private_dir_dacl(path: &Path) -> String {
+    private_dir::tests::dacl_of(path)
+}
+
+/// The binding behind [`create_private_dir`]: the current user's SID, an
+/// SDDL security descriptor, and `CreateDirectoryW`.
+///
+/// Declared by hand for the same reason as [`ffi`]: six functions and two
+/// structs do not justify a bindings dependency.
+#[allow(unsafe_code)]
+mod private_dir {
+    use std::ffi::c_void;
+    use std::io;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// `SECURITY_ATTRIBUTES` from `minwinbase.h`.
+    #[repr(C)]
+    struct SecurityAttributes {
+        length: u32,
+        security_descriptor: *mut c_void,
+        inherit_handle: i32,
+    }
+
+    /// `SID_AND_ATTRIBUTES` from `winnt.h`, the start of `TOKEN_USER`.
+    #[repr(C)]
+    struct SidAndAttributes {
+        sid: *mut c_void,
+        attributes: u32,
+    }
+
+    const TOKEN_QUERY: u32 = 0x0008;
+    /// `TokenUser` in `TOKEN_INFORMATION_CLASS`.
+    const TOKEN_USER: i32 = 1;
+    const SDDL_REVISION_1: u32 = 1;
+    /// Paths longer than this use the `\\?\` form, which `CreateDirectoryW`
+    /// needs past `MAX_PATH` (260) minus room for an 8.3 file name.
+    const LONG_PATH: usize = 248;
+    /// Upper bound for a SID's string form; real ones are under 200 units.
+    const MAX_SID_LEN: usize = 256;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn LocalFree(memory: *mut c_void) -> *mut c_void;
+        fn CreateDirectoryW(path: *const u16, attributes: *const SecurityAttributes) -> i32;
+    }
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn OpenProcessToken(process: *mut c_void, access: u32, token: *mut *mut c_void) -> i32;
+        fn GetTokenInformation(
+            token: *mut c_void,
+            class: i32,
+            information: *mut c_void,
+            length: u32,
+            returned: *mut u32,
+        ) -> i32;
+        fn ConvertSidToStringSidW(sid: *mut c_void, string: *mut *mut u16) -> i32;
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl: *const u16,
+            revision: u32,
+            descriptor: *mut *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+
+    /// Creates `path` (one level; its parent must exist) with a protected
+    /// DACL: full control for the current user, `SYSTEM`, and
+    /// `Administrators`, inherited by everything created inside.
+    pub(super) fn create(path: &Path) -> io::Result<()> {
+        let sddl = descriptor_for(&current_user_sid()?);
+        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+        let mut descriptor: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `sddl` is a live, NUL-terminated UTF-16 string;
+        // `descriptor` is a valid out-pointer, and a null size pointer is
+        // allowed by the API.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || descriptor.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let attributes = SecurityAttributes {
+            length: u32::try_from(size_of::<SecurityAttributes>()).unwrap_or(u32::MAX),
+            security_descriptor: descriptor,
+            inherit_handle: 0,
+        };
+        let wide = wide_path(path);
+        // SAFETY: `wide` is a live, NUL-terminated UTF-16 path, and
+        // `attributes` points to a valid descriptor that stays allocated
+        // until the `LocalFree` below.
+        let created = unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) };
+        let result = if created == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        };
+        // SAFETY: `descriptor` was allocated by the conversion above with
+        // `LocalAlloc`, as documented, and is not used after this.
+        // LocalFree returns null on success; there is nothing to do if it fails.
+        let _freed = unsafe { LocalFree(descriptor) };
+        result
+    }
+
+    /// The SDDL for a private directory owned by `user`. `P` blocks
+    /// inheritance from the parent; `OICI` passes the entries on to files
+    /// and directories created inside; `FA` is full access.
+    pub(super) fn descriptor_for(user: &str) -> String {
+        format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+    }
+
+    /// The current user's SID in string form (`S-1-5-21-...`).
+    pub(super) fn current_user_sid() -> io::Result<String> {
+        let mut token: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no
+        // closing; `token` is a valid out-pointer.
+        let opened = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) };
+        if opened == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sid = user_sid_string(token);
+        // SAFETY: `token` was opened above and is closed exactly once.
+        // A failure to close leaks one handle; the SID is still valid.
+        let _closed = unsafe { CloseHandle(token) };
+        sid
+    }
+
+    fn user_sid_string(token: *mut c_void) -> io::Result<String> {
+        let mut needed = 0u32;
+        // SAFETY: a null buffer with length 0 asks for the size, which the
+        // call writes to `needed`; the call is expected to fail here.
+        let _size_query = unsafe {
+            GetTokenInformation(token, TOKEN_USER, std::ptr::null_mut(), 0, &raw mut needed)
+        };
+        if needed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // u64 storage keeps the pointer-sized fields aligned.
+        let words = usize::try_from(needed).unwrap_or(usize::MAX).div_ceil(8);
+        let mut buffer = vec![0u64; words];
+        // SAFETY: `buffer` holds at least `needed` bytes and lives across
+        // the call; `needed` is the size the system asked for.
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TOKEN_USER,
+                buffer.as_mut_ptr().cast::<c_void>(),
+                needed,
+                &raw mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: on success the buffer starts with a `TOKEN_USER`, whose
+        // first member is a `SID_AND_ATTRIBUTES`, and it is 8-byte aligned.
+        let sid = unsafe { (*buffer.as_ptr().cast::<SidAndAttributes>()).sid };
+        let mut string: *mut u16 = std::ptr::null_mut();
+        // SAFETY: `sid` points into `buffer`, which is still alive; `string`
+        // is a valid out-pointer.
+        let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut string) };
+        if converted == 0 || string.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let mut units = Vec::with_capacity(64);
+        for offset in 0..MAX_SID_LEN {
+            // SAFETY: `string` is NUL-terminated (the scan stops there) and
+            // a SID's string form is far shorter than `MAX_SID_LEN`.
+            let unit = unsafe { *string.add(offset) };
+            if unit == 0 {
+                break;
+            }
+            units.push(unit);
+        }
+        // SAFETY: `string` was allocated by the system with `LocalAlloc` and
+        // is not used after this.
+        let _freed = unsafe { LocalFree(string.cast::<c_void>()) };
+        String::from_utf16(&units).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    /// The path as a NUL-terminated wide string, in the `\\?\` form when it
+    /// is long.
+    fn wide_path(path: &Path) -> Vec<u16> {
+        let units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let mut wide = Vec::with_capacity(units.len() + 8);
+        let backslash = u16::from(b'\\');
+        let already_verbatim =
+            units.starts_with(&[backslash, backslash, u16::from(b'?'), backslash]);
+        if units.len() >= LONG_PATH && !already_verbatim {
+            if units.starts_with(&[backslash, backslash]) {
+                wide.extend(r"\\?\UNC".encode_utf16());
+                wide.extend(
+                    units
+                        .iter()
+                        .skip(1)
+                        .map(|&u| if u == u16::from(b'/') { backslash } else { u }),
+                );
+            } else {
+                wide.extend(r"\\?\".encode_utf16());
+                wide.extend(
+                    units
+                        .iter()
+                        .map(|&u| if u == u16::from(b'/') { backslash } else { u }),
+                );
+            }
+        } else {
+            wide.extend(units);
+        }
+        wide.push(0);
+        wide
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) mod tests {
+        use super::*;
+
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn GetNamedSecurityInfoW(
+                name: *const u16,
+                object: u32,
+                info: u32,
+                owner: *mut *mut c_void,
+                group: *mut *mut c_void,
+                dacl: *mut *mut c_void,
+                sacl: *mut *mut c_void,
+                descriptor: *mut *mut c_void,
+            ) -> u32;
+            fn ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor: *mut c_void,
+                revision: u32,
+                info: u32,
+                string: *mut *mut u16,
+                length: *mut u32,
+            ) -> i32;
+        }
+
+        const SE_FILE_OBJECT: u32 = 1;
+        const DACL_SECURITY_INFORMATION: u32 = 4;
+
+        /// The directory's DACL in SDDL form, read back from the system.
+        pub(crate) fn dacl_of(path: &Path) -> String {
+            let wide = wide_path(path);
+            let mut descriptor: *mut c_void = std::ptr::null_mut();
+            let mut dacl: *mut c_void = std::ptr::null_mut();
+            // SAFETY: `wide` is NUL-terminated; every out-pointer is valid
+            // or null where the API allows it.
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    wide.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &raw mut dacl,
+                    std::ptr::null_mut(),
+                    &raw mut descriptor,
+                )
+            };
+            assert_eq!(status, 0, "GetNamedSecurityInfoW failed");
+            let text = dacl_string(descriptor);
+            // SAFETY: allocated by the system with `LocalAlloc`.
+            let _freed = unsafe { LocalFree(descriptor) };
+            text
+        }
+
+        /// The DACL part of `sddl` as the system writes it back: SIDs with
+        /// a well-known short name (`LA` for the built-in Administrator,
+        /// for example) come back as that name.
+        pub(crate) fn canonical(sddl: &str) -> String {
+            let wide: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+            let mut descriptor: *mut c_void = std::ptr::null_mut();
+            // SAFETY: as in `create`.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide.as_ptr(),
+                    SDDL_REVISION_1,
+                    &raw mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(ok, 0);
+            let text = dacl_string(descriptor);
+            // SAFETY: allocated by the conversion with `LocalAlloc`.
+            let _freed = unsafe { LocalFree(descriptor) };
+            text
+        }
+
+        fn dacl_string(descriptor: *mut c_void) -> String {
+            let mut string: *mut u16 = std::ptr::null_mut();
+            let mut length = 0u32;
+            // SAFETY: `descriptor` is a valid security descriptor owned by
+            // the caller; `string` and `length` are valid out-pointers.
+            let ok = unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &raw mut string,
+                    &raw mut length,
+                )
+            };
+            assert_ne!(ok, 0);
+            // SAFETY: `string` holds `length` units, terminator included.
+            let units = unsafe { std::slice::from_raw_parts(string, length as usize) };
+            let text = String::from_utf16_lossy(units)
+                .trim_end_matches('\0')
+                .to_owned();
+            // SAFETY: allocated by the system with `LocalAlloc`.
+            let _freed = unsafe { LocalFree(string.cast::<c_void>()) };
+            text
+        }
+
+        #[test]
+        fn test_current_user_sid_is_a_sid() {
+            let sid = current_user_sid().unwrap();
+            assert!(sid.starts_with("S-1-"), "{sid}");
+        }
+
+        #[test]
+        fn test_descriptor_for_is_protected_and_lists_three_trustees() {
+            let sddl = descriptor_for("S-1-5-21-1-2-3-1001");
+            assert!(sddl.starts_with("D:P"));
+            assert_eq!(sddl.matches("(A;OICI;FA;;;").count(), 3);
+        }
+
+        #[test]
+        fn test_create_sets_a_private_dacl() {
+            let dir = std::env::temp_dir().join(format!("path-lib-private-{}", std::process::id()));
+            drop(std::fs::remove_dir_all(&dir));
+            create(&dir).unwrap();
+            let dacl = dacl_of(&dir);
+            let expected = canonical(&descriptor_for(&current_user_sid().unwrap()));
+            // Exactly the protected list we set: the user, SYSTEM, and
+            // Administrators, nothing inherited, nobody else.
+            assert_eq!(dacl, expected);
+            assert!(dacl.starts_with("D:P"), "not protected: {dacl}");
+            assert_eq!(dacl.matches("(A;").count(), 3, "{dacl}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn test_create_twice_reports_already_exists() {
+            let dir =
+                std::env::temp_dir().join(format!("path-lib-private-twice-{}", std::process::id()));
+            drop(std::fs::remove_dir_all(&dir));
+            create(&dir).unwrap();
+            let again = create(&dir).unwrap_err();
+            assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn test_wide_path_uses_verbatim_form_only_when_long() {
+            let short = wide_path(Path::new(r"C:\short"));
+            assert_eq!(String::from_utf16_lossy(&short), "C:\\short\0");
+            let long = format!(r"C:\{}", "a".repeat(300));
+            let wide = String::from_utf16_lossy(&wide_path(Path::new(&long)));
+            assert!(wide.starts_with(r"\\?\C:\"), "{wide}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_env::{assert_distinct, env_from};
