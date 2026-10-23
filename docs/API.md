@@ -18,7 +18,7 @@
 </div>
 <br>
 
-> **Status:** This reference tracks the public surface of `path-lib` **1.1.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
+> **Status:** This reference tracks the public surface of `path-lib` **1.1.1**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
 
 ## Table of Contents
 

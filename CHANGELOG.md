@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] - 2026-10-23
+
+### Fixed
+
+- The documentation builds on docs.rs again. The crate root asked nightly
+  rustdoc for the `doc_auto_cfg` feature, which nightly has since folded
+  into `doc_cfg` and removed, so the docs.rs builds of 1.0.0 and 1.1.0
+  failed. No code change.
+
+---
+
 ## [1.1.0] - 2026-10-23
 
 ### Added
@@ -114,7 +125,8 @@ Initial release.
 - Unit, integration, and property tests; criterion benchmarks; CI for
   Linux, macOS, and Windows on stable and MSRV 1.85.
 
-[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/jamesgober/path-lib/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/jamesgober/path-lib/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jamesgober/path-lib/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/jamesgober/path-lib/releases/tag/v0.1.0
