@@ -55,8 +55,8 @@ A successful join performs exactly one allocation, sized up front for the base p
 
 | Operation | Median |
 |---|---|
-| `App::new("HiveDB")` | 581 ns |
-| `App::global("HiveDB")` | 570 ns |
+| `App::new("MyApp")` | 581 ns |
+| `App::global("MyApp")` | 570 ns |
 
 Construction validates the name and builds eight `PathBuf`s from the cached bases. It is a one-time cost; keep the `App` and pass it around. `with_dir` and `with_env` run once after construction and are not benchmarked separately.
 

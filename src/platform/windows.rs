@@ -1008,24 +1008,24 @@ mod tests {
         };
         let env = env_from(&[("TEMP", r"C:\Users\u\AppData\Local\Temp")]);
         let l = UserBases::resolve_with(&env, &known)
-            .map(|b| b.layout("HiveDB"))
+            .map(|b| b.layout("MyApp"))
             .ok();
         let l = l.as_ref();
         assert_eq!(
             l.map(|l| l.documents.as_path()),
-            Some(Path::new(r"D:\OneDrive\Documents\HiveDB"))
+            Some(Path::new(r"D:\OneDrive\Documents\MyApp"))
         );
         assert_eq!(
             l.map(|l| l.data.as_path()),
-            Some(Path::new(r"C:\Users\u\AppData\Local\HiveDB"))
+            Some(Path::new(r"C:\Users\u\AppData\Local\MyApp"))
         );
         assert_eq!(
             l.map(|l| l.config.as_path()),
-            Some(Path::new(r"C:\Users\u\AppData\Roaming\HiveDB"))
+            Some(Path::new(r"C:\Users\u\AppData\Roaming\MyApp"))
         );
         assert_eq!(
             l.map(|l| l.temp.as_path()),
-            Some(Path::new(r"C:\Users\u\AppData\Local\Temp\HiveDB"))
+            Some(Path::new(r"C:\Users\u\AppData\Local\Temp\MyApp"))
         );
         if let Some(l) = l {
             assert_distinct(l);
@@ -1068,15 +1068,15 @@ mod tests {
             s.as_ref().map(|s| s.root.clone()),
             Some(PathBuf::from(r"C:\"))
         );
-        let l = s.map(|s| s.layout("HiveDB"));
+        let l = s.map(|s| s.layout("MyApp"));
         let l = l.as_ref();
         assert_eq!(
             l.map(|l| l.data.as_path()),
-            Some(Path::new(r"C:\ProgramData\HiveDB"))
+            Some(Path::new(r"C:\ProgramData\MyApp"))
         );
         assert_eq!(
             l.map(|l| l.documents.as_path()),
-            Some(Path::new(r"C:\Users\Public\Documents\HiveDB"))
+            Some(Path::new(r"C:\Users\Public\Documents\MyApp"))
         );
         if let Some(l) = l {
             assert_distinct(l);

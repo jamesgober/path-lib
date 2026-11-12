@@ -179,7 +179,7 @@ Stable release. The public API is frozen for 1.x under
   `Reason::NotAbsolute`, or `Reason::SharedDir` when the new directory
   would equal another kind's.
 - `App::with_env(prefix)` applies overrides from `<PREFIX>_<KIND>_DIR`
-  environment variables, such as `HIVEDB_DATA_DIR`. Unset and empty
+  environment variables, such as `MYAPP_DATA_DIR`. Unset and empty
   variables are ignored; other values go through the same checks as
   `with_dir`, and errors show the offending `NAME=value`. The prefix must
   be ASCII letters, digits, and `_`, not starting with a digit.

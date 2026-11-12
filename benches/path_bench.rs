@@ -10,7 +10,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use path_lib::App;
 
 fn bench_join(c: &mut Criterion) {
-    let base = Path::new("/var/lib/hivedb");
+    let base = Path::new("/var/lib/myapp");
     let mut g = c.benchmark_group("join");
     g.bench_function("short", |b| {
         b.iter(|| path_lib::join(black_box(base), black_box("db")));
@@ -52,11 +52,11 @@ fn bench_os(c: &mut Criterion) {
 
 fn bench_app(c: &mut Criterion) {
     let mut g = c.benchmark_group("app");
-    g.bench_function("new_user", |b| b.iter(|| App::new(black_box("HiveDB"))));
+    g.bench_function("new_user", |b| b.iter(|| App::new(black_box("MyApp"))));
     g.bench_function("new_global", |b| {
-        b.iter(|| App::global(black_box("HiveDB")));
+        b.iter(|| App::global(black_box("MyApp")));
     });
-    if let Ok(app) = App::new("HiveDB") {
+    if let Ok(app) = App::new("MyApp") {
         g.bench_function("data_accessor", |b| {
             b.iter(|| black_box(&app).data().as_os_str().len());
         });

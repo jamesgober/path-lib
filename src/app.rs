@@ -31,9 +31,9 @@ use crate::{ops, os, rules};
 /// ```
 /// use path_lib::{App, Kind};
 ///
-/// let app = App::new("HiveDB")?;
+/// let app = App::new("MyApp")?;
 ///
-/// // Base directories, e.g. ~/Library/Application Support/HiveDB on macOS.
+/// // Base directories, e.g. ~/Library/Application Support/MyApp on macOS.
 /// let data = app.data();
 ///
 /// // Hardened sub-paths: any slash style, always inside the base.
@@ -101,9 +101,9 @@ impl App {
     /// # Examples
     ///
     /// ```
-    /// let app = path_lib::App::global("HiveDB")?;
+    /// let app = path_lib::App::global("MyApp")?;
     /// if cfg!(target_os = "linux") {
-    ///     assert_eq!(app.config(), std::path::Path::new("/etc/HiveDB"));
+    ///     assert_eq!(app.config(), std::path::Path::new("/etc/MyApp"));
     /// }
     /// # Ok::<(), path_lib::Error>(())
     /// ```
@@ -130,7 +130,7 @@ impl App {
     ///
     /// ```
     /// // Keep everything next to the executable.
-    /// let app = path_lib::App::portable("HiveDB", path_lib::exe_dir()?)?;
+    /// let app = path_lib::App::portable("MyApp", path_lib::exe_dir()?)?;
     /// assert!(app.data().ends_with("data"));
     /// # Ok::<(), path_lib::Error>(())
     /// ```
@@ -167,7 +167,7 @@ impl App {
     /// ```
     /// use path_lib::{App, Scope};
     ///
-    /// let app = App::auto("HiveDB")?;
+    /// let app = App::auto("MyApp")?;
     /// assert!(matches!(app.scope(), Scope::User | Scope::Portable));
     /// # Ok::<(), path_lib::Error>(())
     /// ```
@@ -214,8 +214,8 @@ impl App {
     /// ```
     /// use path_lib::{App, Kind};
     ///
-    /// let data = std::env::temp_dir().join("hivedb-data");
-    /// let app = App::new("HiveDB")?.with_dir(Kind::Data, &data)?;
+    /// let data = std::env::temp_dir().join("myapp-data");
+    /// let app = App::new("MyApp")?.with_dir(Kind::Data, &data)?;
     /// assert_eq!(app.data(), path_lib::clean(&data));
     /// # Ok::<(), path_lib::Error>(())
     /// ```
@@ -247,8 +247,8 @@ impl App {
     }
 
     /// Applies directory overrides from environment variables named
-    /// `<PREFIX>_<KIND>_DIR`, such as `HIVEDB_DATA_DIR` or
-    /// `HIVEDB_LOGS_DIR` (see [`Kind::env_name`]).
+    /// `<PREFIX>_<KIND>_DIR`, such as `MYAPP_DATA_DIR` or
+    /// `MYAPP_LOGS_DIR` (see [`Kind::env_name`]).
     ///
     /// Unset and empty variables leave the directory unchanged; every
     /// other value goes through [`with_dir`](App::with_dir). This is the
@@ -267,8 +267,8 @@ impl App {
     /// # Examples
     ///
     /// ```
-    /// // With HIVEDB_DATA_DIR=/srv/hivedb set, data moves there.
-    /// let app = path_lib::App::global("HiveDB")?.with_env("HIVEDB")?;
+    /// // With MYAPP_DATA_DIR=/srv/myapp set, data moves there.
+    /// let app = path_lib::App::global("MyApp")?.with_env("MYAPP")?;
     /// # let _ = app;
     /// # Ok::<(), path_lib::Error>(())
     /// ```
@@ -303,7 +303,7 @@ impl App {
     /// # Examples
     ///
     /// ```
-    /// let app = path_lib::App::new("HiveDB")?;
+    /// let app = path_lib::App::new("MyApp")?;
     /// for (kind, dir) in app.dirs() {
     ///     assert_eq!(app.dir(kind), dir);
     /// }
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_validate_name_accepts_ordinary_names() {
-        for n in ["HiveDB", "hive-db", "Hive DB", "app_1", "名前", ".hidden"] {
+        for n in ["MyApp", "my-app", "My App", "app_1", "名前", ".hidden"] {
             assert!(validate_name(n).is_ok(), "{n:?}");
         }
     }

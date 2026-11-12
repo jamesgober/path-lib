@@ -58,37 +58,37 @@ fn test_global_app_dirs_are_absolute_distinct_and_outside_home() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_global_linux_paths_follow_fhs() {
-    let app = App::global("hivedb").unwrap();
-    assert_eq!(app.data(), Path::new("/var/lib/hivedb"));
-    assert_eq!(app.config(), Path::new("/etc/hivedb"));
-    assert_eq!(app.logs(), Path::new("/var/log/hivedb"));
-    assert_eq!(app.runtime(), Path::new("/run/hivedb"));
+    let app = App::global("myapp").unwrap();
+    assert_eq!(app.data(), Path::new("/var/lib/myapp"));
+    assert_eq!(app.config(), Path::new("/etc/myapp"));
+    assert_eq!(app.logs(), Path::new("/var/log/myapp"));
+    assert_eq!(app.runtime(), Path::new("/run/myapp"));
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn test_macos_paths_follow_library_domains() {
-    let user = App::new("HiveDB").unwrap();
+    let user = App::new("MyApp").unwrap();
     let home = path_lib::home().unwrap();
-    assert_eq!(user.data(), home.join("Library/Application Support/HiveDB"));
-    let global = App::global("HiveDB").unwrap();
+    assert_eq!(user.data(), home.join("Library/Application Support/MyApp"));
+    let global = App::global("MyApp").unwrap();
     assert_eq!(
         global.data(),
-        Path::new("/Library/Application Support/HiveDB")
+        Path::new("/Library/Application Support/MyApp")
     );
 }
 
 #[cfg(windows)]
 #[test]
 fn test_windows_paths_use_known_folders() {
-    let app = App::new("HiveDB").unwrap();
+    let app = App::new("MyApp").unwrap();
     let local = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
     let roaming = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap());
-    assert_eq!(app.data(), path_lib::clean(local.join("HiveDB")));
-    assert_eq!(app.config(), path_lib::clean(roaming.join("HiveDB")));
-    let global = App::global("HiveDB").unwrap();
+    assert_eq!(app.data(), path_lib::clean(local.join("MyApp")));
+    assert_eq!(app.config(), path_lib::clean(roaming.join("MyApp")));
+    let global = App::global("MyApp").unwrap();
     let program_data = std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap());
-    assert_eq!(global.data(), path_lib::clean(program_data.join("HiveDB")));
+    assert_eq!(global.data(), path_lib::clean(program_data.join("MyApp")));
 }
 
 #[test]
