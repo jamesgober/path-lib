@@ -182,7 +182,7 @@ pub(super) fn copy_tree(from: &Path, to: &Path, max_depth: usize) -> Result<u64>
     let mut bytes = 0u64;
     let mut stack = vec![(from.to_path_buf(), to.to_path_buf(), 0usize)];
     while let Some((src, dst, depth)) = stack.pop() {
-        fs::create_dir(&dst).map_err(|e| Error::io("create directory", &dst, e))?;
+        create_dir_like(&src, &dst)?;
         let entries = fs::read_dir(&src).map_err(|e| Error::io("read directory", &src, e))?;
         for entry in entries {
             let entry = entry.map_err(|e| Error::io("read directory", &src, e))?;
@@ -210,6 +210,33 @@ pub(super) fn copy_tree(from: &Path, to: &Path, max_depth: usize) -> Result<u64>
         }
     }
     Ok(bytes)
+}
+
+/// Creates `dst` with the permission bits of the directory `src` (Unix),
+/// so a `0700` tree is never copied as `0755`. The new directory starts
+/// with at most those bits and gets them exactly once created.
+#[cfg(unix)]
+fn create_dir_like(src: &Path, dst: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let mode = fs::symlink_metadata(src)
+        .map_err(|e| Error::io("inspect", src, e))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    let mut builder = fs::DirBuilder::new();
+    let _builder = builder.mode(mode & 0o777);
+    builder
+        .create(dst)
+        .map_err(|e| Error::io("create directory", dst, e))?;
+    fs::set_permissions(dst, fs::Permissions::from_mode(mode))
+        .map_err(|e| Error::io("set permissions", dst, e))
+}
+
+/// Windows: the new directory inherits the destination's access control
+/// list, as new files do.
+#[cfg(windows)]
+fn create_dir_like(_src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir(dst).map_err(|e| Error::io("create directory", dst, e))
 }
 
 pub(super) fn is_cross_device(e: &io::Error) -> bool {

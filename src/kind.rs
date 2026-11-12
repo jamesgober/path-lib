@@ -34,10 +34,12 @@ impl fmt::Display for Scope {
 
 /// A kind of application directory.
 ///
-/// Every kind resolves to a different directory, so clearing one (say,
-/// the cache) can never wipe another wholesale. Some kinds nest inside
-/// [`Kind::Data`] on platforms that have no separate location for them;
-/// the per-platform tables are in the crate documentation.
+/// Every kind resolves to a different directory. Some kinds nest inside
+/// another on platforms that have no separate location for them (inside
+/// [`Kind::Data`] on Windows and macOS, the logs inside the state on
+/// Linux); the per-platform tables are in the crate documentation.
+/// [`App::remove`](crate::App::remove) refuses a path that holds another
+/// kind's directory, so clearing one kind never wipes another.
 ///
 /// Marked `#[non_exhaustive]` so a kind can be added in a minor release;
 /// `match` on it with a wildcard arm, or iterate [`Kind::ALL`].

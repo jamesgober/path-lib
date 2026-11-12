@@ -42,7 +42,8 @@
 - **Portable detection** &mdash; `App::auto` switches to a portable layout when a `.portable` file sits next to the executable
 - **Overrides** &mdash; `with_dir` relocates one kind; `with_env("HIVEDB")` reads `HIVEDB_DATA_DIR`, `HIVEDB_LOGS_DIR`, and so on
 - **Native conventions** &mdash; XDG and FHS on Linux and BSD, the `Library` domains on macOS, Known Folders on Windows
-- **Distinct by construction** &mdash; no two kinds share a directory, so clearing the cache can never wipe data; overrides are checked too
+- **Distinct by construction** &mdash; no two kinds share a directory, and overrides are checked too. Some kinds nest inside others (on Windows, cache and logs inside data), so `remove` refuses a path that holds another kind and `clear` empties one kind while keeping those nested in it
+- **Checked before use** &mdash; an existing directory of the application must be owned by the current user or an administrator and not writable by others, so a directory another user created first in `%ProgramData%` or `/var/tmp` is refused
 
 ### Hardened Sub-Paths
 - **Either slash style** &mdash; `"a/b"`, `"a\\b"`, `"/a//b/"` all mean the same thing and produce the platform separator
@@ -60,6 +61,8 @@
 - **Never overwrites**, **never follows links**, **refuses catastrophic deletes**
 - **Atomic copies** &mdash; staged under a temporary name, renamed into place when complete
 - **`write_atomic`** &mdash; replaces a file through a flushed temporary and a rename; keeps Unix permissions and symbolic links
+- **`write_atomic_private`** &mdash; the same for secrets: `0600` on Unix, a private access control list on Windows, from the first byte
+- **`check_owner`, `open_checked`** &mdash; refuse a file or directory with an untrusted owner, or that other accounts can change (or read), read from the handle on every OS
 - **`file_access`** (Windows) &mdash; whether other accounts can change or read an open file, from its handle, before you trust its contents
 
 <hr>
@@ -68,7 +71,7 @@
 
 ```toml
 [dependencies]
-path-lib = "1.2"
+path-lib = "1.3"
 ```
 
 <hr>

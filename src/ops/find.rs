@@ -1,4 +1,9 @@
-//! Recursive name search with linear-time wildcard matching.
+//! Recursive name search with wildcard matching.
+//!
+//! The matcher backtracks on `*`, so one name costs at most
+//! `pattern length * name length` steps; both are capped at
+//! [`MAX_SEGMENT_BYTES`](crate::MAX_SEGMENT_BYTES), which bounds a match at
+//! about 65,000 steps.
 
 use std::fs;
 use std::path::{Path, PathBuf};

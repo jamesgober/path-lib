@@ -414,16 +414,33 @@ mod ffi {
     }
 }
 
-/// Creates one directory private to the current user (see
+/// Creates one directory with a protected access control list: full
+/// control for the current user, `SYSTEM`, and `Administrators`, plus
+/// read and list access for `Users` when `shared_read` is set (see
+/// [`App::ensure`](crate::App::ensure) and
 /// [`App::ensure_private`](crate::App::ensure_private)).
-pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
-    private_dir::create(path)
+pub(crate) fn create_protected_dir(path: &Path, shared_read: bool) -> std::io::Result<()> {
+    private_dir::create(path, shared_read)
+}
+
+/// Replaces the DACL of an open file with a protected one for the
+/// current user, `SYSTEM`, and `Administrators` only. The handle needs
+/// `WRITE_DAC`.
+pub(crate) fn set_private_file_dacl(file: &std::fs::File) -> std::io::Result<()> {
+    private_dir::set_private_file_dacl(file)
 }
 
 /// Reads who can change or read an open file (see
 /// [`file_access`](crate::file_access)).
 pub(crate) fn file_access(file: &std::fs::File) -> std::io::Result<crate::FileAccess> {
     access::file_access(file)
+}
+
+/// Like [`file_access`], for an open directory: entries that pass rights
+/// on to new files and sub-directories count too (see
+/// [`check_owner`](crate::check_owner)).
+pub(crate) fn dir_access(dir: &std::fs::File) -> std::io::Result<crate::FileAccess> {
+    access::dir_access(dir)
 }
 
 /// The binding behind [`file_access`]: the volume flags, the file's
@@ -437,8 +454,9 @@ pub(crate) fn private_dir_dacl(path: &Path) -> String {
     private_dir::tests::dacl_of(path)
 }
 
-/// The binding behind [`create_private_dir`]: the current user's SID, an
-/// SDDL security descriptor, and `CreateDirectoryW`.
+/// The binding behind [`create_protected_dir`] and
+/// [`set_private_file_dacl`]: the current user's SID, an SDDL security
+/// descriptor, `CreateDirectoryW`, and `SetSecurityInfo`.
 ///
 /// Declared by hand for the same reason as [`ffi`]: six functions and two
 /// structs do not justify a bindings dependency.
@@ -465,6 +483,10 @@ mod private_dir {
     }
 
     const TOKEN_QUERY: u32 = 0x0008;
+    /// `SE_FILE_OBJECT` in `SE_OBJECT_TYPE`.
+    const SE_FILE_OBJECT: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x4;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
     /// `TokenUser` in `TOKEN_INFORMATION_CLASS`.
     const TOKEN_USER: i32 = 1;
     const SDDL_REVISION_1: u32 = 1;
@@ -499,49 +521,132 @@ mod private_dir {
             descriptor: *mut *mut c_void,
             size: *mut u32,
         ) -> i32;
+        fn GetSecurityDescriptorDacl(
+            descriptor: *mut c_void,
+            present: *mut i32,
+            dacl: *mut *mut c_void,
+            defaulted: *mut i32,
+        ) -> i32;
+        fn SetSecurityInfo(
+            handle: *mut c_void,
+            object: u32,
+            info: u32,
+            owner: *mut c_void,
+            group: *mut c_void,
+            dacl: *mut c_void,
+            sacl: *mut c_void,
+        ) -> u32;
+    }
+
+    /// A security descriptor built from SDDL by the system, freed on drop.
+    struct Sddl(*mut c_void);
+
+    impl Sddl {
+        fn new(sddl: &str) -> io::Result<Self> {
+            let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
+            let mut descriptor: *mut c_void = std::ptr::null_mut();
+            // SAFETY: `sddl` is a live, NUL-terminated UTF-16 string;
+            // `descriptor` is a valid out-pointer, and a null size pointer
+            // is allowed by the API.
+            let ok = unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &raw mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 || descriptor.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(descriptor))
+        }
+    }
+
+    impl Drop for Sddl {
+        fn drop(&mut self) {
+            // SAFETY: allocated by the conversion with `LocalAlloc`, as
+            // documented, and freed exactly once, here. LocalFree returns
+            // null on success; there is nothing to do if it fails.
+            let _freed = unsafe { LocalFree(self.0) };
+        }
     }
 
     /// Creates `path` (one level; its parent must exist) with a protected
     /// DACL: full control for the current user, `SYSTEM`, and
-    /// `Administrators`, inherited by everything created inside.
-    pub(super) fn create(path: &Path) -> io::Result<()> {
-        let sddl = descriptor_for(&current_user_sid()?);
-        let sddl: Vec<u16> = sddl.encode_utf16().chain(Some(0)).collect();
-        let mut descriptor: *mut c_void = std::ptr::null_mut();
-        // SAFETY: `sddl` is a live, NUL-terminated UTF-16 string;
-        // `descriptor` is a valid out-pointer, and a null size pointer is
-        // allowed by the API.
-        let ok = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl.as_ptr(),
-                SDDL_REVISION_1,
-                &raw mut descriptor,
-                std::ptr::null_mut(),
-            )
+    /// `Administrators`, plus read and list access for `Users` when
+    /// `shared_read` is set, inherited by everything created inside.
+    pub(super) fn create(path: &Path, shared_read: bool) -> io::Result<()> {
+        let user = current_user_sid()?;
+        let sddl = if shared_read {
+            shared_descriptor_for(&user)
+        } else {
+            descriptor_for(&user)
         };
-        if ok == 0 || descriptor.is_null() {
-            return Err(io::Error::last_os_error());
-        }
+        let descriptor = Sddl::new(&sddl)?;
         let attributes = SecurityAttributes {
             length: u32::try_from(size_of::<SecurityAttributes>()).unwrap_or(u32::MAX),
-            security_descriptor: descriptor,
+            security_descriptor: descriptor.0,
             inherit_handle: 0,
         };
         let wide = wide_path(path);
         // SAFETY: `wide` is a live, NUL-terminated UTF-16 path, and
         // `attributes` points to a valid descriptor that stays allocated
-        // until the `LocalFree` below.
+        // until `descriptor` drops, after the call.
         let created = unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) };
-        let result = if created == 0 {
+        if created == 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
+        }
+    }
+
+    /// Sets a protected DACL on an open file: full control for the current
+    /// user, `SYSTEM`, and `Administrators`, nothing for anyone else.
+    pub(super) fn set_private_file_dacl(file: &std::fs::File) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        let user = current_user_sid()?;
+        let descriptor = Sddl::new(&file_descriptor_for(&user))?;
+        let (mut present, mut defaulted) = (0i32, 0i32);
+        let mut dacl: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `descriptor.0` is a valid descriptor; every out-pointer
+        // is valid.
+        let ok = unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.0,
+                &raw mut present,
+                &raw mut dacl,
+                &raw mut defaulted,
+            )
         };
-        // SAFETY: `descriptor` was allocated by the conversion above with
-        // `LocalAlloc`, as documented, and is not used after this.
-        // LocalFree returns null on success; there is nothing to do if it fails.
-        let _freed = unsafe { LocalFree(descriptor) };
-        result
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if present == 0 || dacl.is_null() {
+            return Err(io::Error::other("the private descriptor has no DACL"));
+        }
+        // SAFETY: the handle is borrowed from a live `File`; `dacl` points
+        // into `descriptor`, which is alive until the end of this function;
+        // the owner, group, and SACL are null because they are not set.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(i32::try_from(status).map_or_else(
+                |_| io::Error::other("SetSecurityInfo failed"),
+                io::Error::from_raw_os_error,
+            ))
+        }
     }
 
     /// The SDDL for a private directory owned by `user`. `P` blocks
@@ -549,6 +654,19 @@ mod private_dir {
     /// and directories created inside; `FA` is full access.
     pub(super) fn descriptor_for(user: &str) -> String {
         format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+    }
+
+    /// [`descriptor_for`] plus read, list, and traverse access for `Users`
+    /// (`0x1200a9`: `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`), the
+    /// Windows counterpart of mode `0755`.
+    pub(super) fn shared_descriptor_for(user: &str) -> String {
+        format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
+    }
+
+    /// The DACL for one private file: no inheritance flags, since a file
+    /// has no children.
+    pub(super) fn file_descriptor_for(user: &str) -> String {
+        format!("D:P(A;;FA;;;{user})(A;;FA;;;SY)(A;;FA;;;BA)")
     }
 
     /// The current user's SID in string form (`S-1-5-21-...`).
@@ -703,9 +821,6 @@ mod private_dir {
             ) -> i32;
         }
 
-        const SE_FILE_OBJECT: u32 = 1;
-        const DACL_SECURITY_INFORMATION: u32 = 4;
-
         /// The directory's DACL in SDDL form, read back from the system.
         pub(crate) fn dacl_of(path: &Path) -> String {
             let wide = wide_path(path);
@@ -796,7 +911,7 @@ mod private_dir {
         fn test_create_sets_a_private_dacl() {
             let dir = std::env::temp_dir().join(format!("path-lib-private-{}", std::process::id()));
             drop(std::fs::remove_dir_all(&dir));
-            create(&dir).unwrap();
+            create(&dir, false).unwrap();
             let dacl = dacl_of(&dir);
             let expected = canonical(&descriptor_for(&current_user_sid().unwrap()));
             // Exactly the protected list we set: the user, SYSTEM, and
@@ -812,9 +927,54 @@ mod private_dir {
             let dir =
                 std::env::temp_dir().join(format!("path-lib-private-twice-{}", std::process::id()));
             drop(std::fs::remove_dir_all(&dir));
-            create(&dir).unwrap();
-            let again = create(&dir).unwrap_err();
+            create(&dir, false).unwrap();
+            let again = create(&dir, false).unwrap_err();
             assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn test_create_shared_read_adds_only_users_read() {
+            let dir = std::env::temp_dir().join(format!("path-lib-shared-{}", std::process::id()));
+            drop(std::fs::remove_dir_all(&dir));
+            create(&dir, true).unwrap();
+            let dacl = dacl_of(&dir);
+            let expected = canonical(&shared_descriptor_for(&current_user_sid().unwrap()));
+            assert_eq!(dacl, expected);
+            assert!(dacl.starts_with("D:P"), "not protected: {dacl}");
+            assert_eq!(dacl.matches("(A;").count(), 4, "{dacl}");
+            let users = dacl.split(')').find(|ace| ace.ends_with(";BU")).unwrap();
+            assert!(users.contains("0x1200a9"), "{users}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn test_set_private_file_dacl_replaces_the_inherited_list() {
+            let dir =
+                std::env::temp_dir().join(format!("path-lib-private-file-{}", std::process::id()));
+            drop(std::fs::remove_dir_all(&dir));
+            create(&dir, true).unwrap();
+            let path = dir.join("secret");
+            let file = {
+                use std::os::windows::fs::OpenOptionsExt;
+                // GENERIC_WRITE | READ_CONTROL | WRITE_DAC
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .access_mode(0x4000_0000 | 0x0002_0000 | 0x0004_0000)
+                    .open(&path)
+                    .unwrap()
+            };
+            assert!(dacl_of(&path).contains(";BU)"), "inherits Users read first");
+            set_private_file_dacl(&file).unwrap();
+            drop(file);
+            // SetSecurityInfo marks the list auto-inherited (`AI`); the
+            // entries are what counts.
+            let dacl = dacl_of(&path).replacen("D:PAI", "D:P", 1);
+            assert_eq!(
+                dacl,
+                canonical(&file_descriptor_for(&current_user_sid().unwrap()))
+            );
             std::fs::remove_dir_all(&dir).unwrap();
         }
 

@@ -12,7 +12,11 @@
 //! | documents | `~/Documents/<app>`                    | `/Users/Shared/<app>`                  |
 //!
 //! `$TMPDIR` on macOS is a per-user directory under `/var/folders`, so
-//! user temp is private without extra work.
+//! user temp is private without extra work. Processes started without
+//! `TMPDIR` (launchd jobs, cron, `sudo`, some CI shells) get the same
+//! directory from `confstr(_CS_DARWIN_USER_TEMP_DIR)`, which is where
+//! `TMPDIR` normally comes from, never the shared `/tmp`. If that fails
+//! too, user temp falls back to `~/Library/Caches/TemporaryItems/<app>`.
 
 use std::path::{Path, PathBuf};
 
@@ -28,8 +32,18 @@ pub(crate) struct UserBases {
 
 impl UserBases {
     pub(crate) fn resolve(env: Env<'_>) -> Result<Self, &'static str> {
+        Self::resolve_with(env, &darwin_user_temp)
+    }
+
+    /// Resolution with an injectable per-user temp lookup, for tests.
+    pub(crate) fn resolve_with(
+        env: Env<'_>,
+        user_temp: &dyn Fn() -> Option<PathBuf>,
+    ) -> Result<Self, &'static str> {
         let home = absolute_var(env, "HOME").ok_or("home")?;
-        let temp = absolute_var(env, "TMPDIR").unwrap_or_else(|| PathBuf::from("/tmp"));
+        let temp = absolute_var(env, "TMPDIR")
+            .or_else(user_temp)
+            .unwrap_or_else(|| home.join("Library").join("Caches").join("TemporaryItems"));
         let folders = Folders {
             documents: home.join("Documents"),
             desktop: home.join("Desktop"),
@@ -59,6 +73,34 @@ impl UserBases {
             data,
         }
     }
+}
+
+/// The per-user temporary directory the system assigns
+/// (`/var/folders/.../T/`), the value `TMPDIR` normally holds.
+#[allow(unsafe_code)]
+fn darwin_user_temp() -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    unsafe extern "C" {
+        /// `confstr(3)`: copies the value of `name`, NUL-terminated, into
+        /// `buf` (truncated to `len` bytes) and returns the full length
+        /// including the NUL, or 0 on error.
+        fn confstr(name: i32, buf: *mut std::ffi::c_char, len: usize) -> usize;
+    }
+    /// From `<unistd.h>`.
+    const CS_DARWIN_USER_TEMP_DIR: i32 = 65537;
+
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `buf` is a live, writable buffer of `buf.len()` bytes, and
+    // `confstr` writes at most that many.
+    let needed = unsafe { confstr(CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    if needed == 0 || needed > buf.len() {
+        return None;
+    }
+    buf.truncate(needed - 1);
+    let path = PathBuf::from(OsString::from_vec(buf));
+    path.is_absolute().then(|| crate::join::clean(&path))
 }
 
 /// Machine-wide bases on macOS. Fixed locations, so resolution cannot fail.
@@ -132,10 +174,38 @@ mod tests {
     }
 
     #[test]
-    fn test_user_missing_tmpdir_falls_back_to_tmp() {
+    fn test_user_missing_tmpdir_uses_the_system_user_temp() {
         let env = env_from(&[("HOME", "/Users/u")]);
-        let l = UserBases::resolve(&env).map(|b| b.layout("a")).ok();
-        assert_eq!(l.map(|l| l.temp), Some(PathBuf::from("/tmp/a")));
+        let assigned = || Some(PathBuf::from("/var/folders/xy/T"));
+        let l = UserBases::resolve_with(&env, &assigned)
+            .map(|b| b.layout("a"))
+            .ok();
+        assert_eq!(
+            l.map(|l| l.temp),
+            Some(PathBuf::from("/var/folders/xy/T/a"))
+        );
+        // Never the shared /tmp, even when the system lookup fails.
+        let l = UserBases::resolve_with(&env, &|| None)
+            .map(|b| b.layout("a"))
+            .ok();
+        assert_eq!(
+            l.map(|l| l.temp),
+            Some(PathBuf::from("/Users/u/Library/Caches/TemporaryItems/a"))
+        );
+    }
+
+    #[test]
+    fn test_darwin_user_temp_is_private_to_this_user() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = darwin_user_temp();
+        assert!(
+            dir.as_ref().is_some_and(
+                |d| d.starts_with("/var/folders") || d.starts_with("/private/var/folders")
+            ),
+            "{dir:?}"
+        );
+        let meta = dir.and_then(|d| std::fs::metadata(d).ok());
+        assert!(meta.is_some_and(|m| m.mode() & 0o077 == 0), "not private");
     }
 
     #[test]

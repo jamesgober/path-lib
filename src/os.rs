@@ -175,10 +175,16 @@ user_folder!(
 ///
 /// `~` alone becomes [`home`]; `~/rest` (or `~\rest` on Windows) becomes
 /// `home/rest`, cleaned. Anything that does not start with `~` is returned
-/// unchanged, so the function is safe to apply to every path read from a
+/// unchanged, so the function can be applied to every path read from a
 /// configuration file or environment variable. Nothing else is expanded:
 /// `$VARS` and `%VARS%` are left alone on purpose, because expanding them
 /// would let configuration values pull in arbitrary environment state.
+///
+/// It is not a confinement check: the result is cleaned, so `..` after
+/// `~` is resolved and can leave the home directory (`~/../../x` becomes
+/// `/x` on Unix, `C:\x` on Windows). To keep a configured path inside a
+/// directory, use [`join`](crate::join) or an [`App`](crate::App) `*_at`
+/// accessor, which reject `..`.
 ///
 /// # Errors
 ///

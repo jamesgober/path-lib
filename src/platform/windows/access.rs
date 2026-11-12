@@ -80,6 +80,9 @@ const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 const ADMINISTRATORS: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0];
 /// `S-1-3-4`, `OWNER RIGHTS`: an entry for whoever owns the file.
 const OWNER_RIGHTS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+/// `S-1-3-0`, `CREATOR OWNER`: in an inheritable entry, replaced by the
+/// account that creates the child.
+const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 
 /// The answer for a volume without access control lists: the fields
 /// carry no information, so they hold the unsafe values and a check that
@@ -124,13 +127,35 @@ unsafe extern "system" {
 }
 
 pub(super) fn file_access(file: &File) -> io::Result<FileAccess> {
+    access_of(file, Object::File)
+}
+
+/// Like [`file_access`], for a directory handle: entries that only pass
+/// rights on to new children count as well.
+pub(super) fn dir_access(dir: &File) -> io::Result<FileAccess> {
+    access_of(dir, Object::Directory)
+}
+
+fn access_of(file: &File, object: Object) -> io::Result<FileAccess> {
     let handle = file.as_raw_handle();
     if !persistent_acls(handle)? {
         return Ok(UNENFORCED);
     }
     let descriptor = Descriptor::of(handle)?;
     let user = current_user_sid()?;
-    evaluate(descriptor.bytes()?, &user)
+    evaluate(descriptor.bytes()?, &user, object)
+}
+
+/// What the security descriptor belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Object {
+    /// A file: only entries that apply to the file itself count.
+    File,
+    /// A directory: entries that are inherited by new files and
+    /// sub-directories count too, because whatever the application
+    /// creates inside would grant those rights. `CREATOR OWNER` in an
+    /// inherited entry is replaced by the creator, so it is trusted.
+    Directory,
 }
 
 /// Whether the volume holding `handle` keeps access control lists.
@@ -250,7 +275,7 @@ impl Drop for Descriptor {
 /// Reads a self-relative security descriptor and decides, for `user`, who
 /// else can change or read the file. Every read is bounds-checked;
 /// anything out of bounds or inconsistent is an `InvalidData` error.
-fn evaluate(descriptor: &[u8], user: &[u8]) -> io::Result<FileAccess> {
+fn evaluate(descriptor: &[u8], user: &[u8], object: Object) -> io::Result<FileAccess> {
     if descriptor.len() < DESCRIPTOR_HEADER || descriptor.first() != Some(&1) {
         return Err(malformed());
     }
@@ -277,11 +302,14 @@ fn evaluate(descriptor: &[u8], user: &[u8]) -> io::Result<FileAccess> {
         });
     }
 
-    let others = granted_to_others(descriptor, dacl_offset, |sid| {
+    let others = granted_to_others(descriptor, dacl_offset, object, |sid, inherit_only| {
         // OWNER RIGHTS stands for the owner, so it is as trusted as the
-        // owner is.
+        // owner is. CREATOR OWNER in an entry that only exists to be
+        // inherited becomes the creator of each child.
         if sid == OWNER_RIGHTS {
             owner_trusted
+        } else if inherit_only && sid == CREATOR_OWNER {
+            true
         } else {
             trusted(sid)
         }
@@ -300,7 +328,8 @@ fn evaluate(descriptor: &[u8], user: &[u8]) -> io::Result<FileAccess> {
 fn granted_to_others(
     descriptor: &[u8],
     offset: usize,
-    trusted: impl Fn(&[u8]) -> bool,
+    object: Object,
+    trusted: impl Fn(&[u8], bool) -> bool,
 ) -> io::Result<u32> {
     let rest = descriptor.get(offset..).ok_or_else(malformed)?;
     let size = usize::from(u16_at(rest, 2)?);
@@ -321,13 +350,14 @@ fn granted_to_others(
         let end = at.checked_add(ace_size).ok_or_else(malformed)?;
         let ace = acl.get(at..end).ok_or_else(malformed)?;
         at = end;
-        if flags & INHERIT_ONLY_ACE != 0 {
+        let inherit_only = flags & INHERIT_ONLY_ACE != 0;
+        if inherit_only && object == Object::File {
             continue;
         }
         match kind {
             ACCESS_ALLOWED_ACE_TYPE | ACCESS_ALLOWED_CALLBACK_ACE_TYPE => {
                 let mask = u32_at(ace, ACE_MASK)?;
-                if !trusted(sid_at(ace, ACE_SID)?) {
+                if !trusted(sid_at(ace, ACE_SID)?, inherit_only) {
                     others |= mask;
                 }
             }
@@ -449,7 +479,11 @@ mod tests {
     }
 
     fn check(sddl: &str) -> FileAccess {
-        evaluate(&descriptor_bytes(sddl), &ALICE_BYTES).unwrap()
+        evaluate(&descriptor_bytes(sddl), &ALICE_BYTES, Object::File).unwrap()
+    }
+
+    fn check_dir(sddl: &str) -> FileAccess {
+        evaluate(&descriptor_bytes(sddl), &ALICE_BYTES, Object::Directory).unwrap()
     }
 
     fn sid_string(bytes: &[u8]) -> String {
@@ -564,6 +598,48 @@ mod tests {
     }
 
     #[test]
+    fn test_evaluate_directory_counts_inherited_entries() {
+        // Inherit-only entries grant nothing on a file, but on a directory
+        // they decide what every new child grants.
+        let sddl = format!("O:{ALICE}D:P(A;;FA;;;{ALICE})(A;OICIIO;FW;;;BU)");
+        let a = check(&sddl);
+        assert!(!a.others_can_write, "{a:?}");
+        let a = check_dir(&sddl);
+        assert!(a.others_can_write && !a.others_can_read, "{a:?}");
+        let a = check_dir(&format!("O:{ALICE}D:P(A;;FA;;;{ALICE})(A;OIIO;FR;;;WD)"));
+        assert!(!a.others_can_write && a.others_can_read, "{a:?}");
+    }
+
+    #[test]
+    fn test_evaluate_directory_trusts_inherited_creator_owner_only() {
+        // The %ProgramData% pattern: CREATOR OWNER full control, inherited.
+        let a = check_dir(&format!(
+            "O:{ALICE}D:P(A;;FA;;;{ALICE})(A;OICIIO;GA;;;CO)(A;;FA;;;SY)"
+        ));
+        assert!(!a.others_can_write && !a.others_can_read, "{a:?}");
+        // On the directory itself CREATOR OWNER is nobody in particular.
+        let a = check_dir(&format!("O:{ALICE}D:P(A;;FA;;;CO)"));
+        assert!(a.others_can_write, "{a:?}");
+        // CREATOR GROUP becomes the creator's group: other accounts.
+        let a = check_dir(&format!("O:{ALICE}D:P(A;OICIIO;GA;;;CG)"));
+        assert!(a.others_can_write && a.others_can_read, "{a:?}");
+    }
+
+    #[test]
+    fn test_evaluate_program_data_default_is_open_to_users() {
+        // The default ACL of %ProgramData%, which every directory created
+        // there with plain inheritance receives.
+        let a = check_dir(
+            "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;GA;;;CO)\
+             (A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)",
+        );
+        assert!(
+            a.owner_trusted && a.others_can_write && a.others_can_read,
+            "{a:?}"
+        );
+    }
+
+    #[test]
     fn test_evaluate_owner_rights_follow_the_owner() {
         let a = check(&format!("O:{ALICE}D:P(A;;FA;;;OW)"));
         assert!(!a.others_can_write && !a.others_can_read, "{a:?}");
@@ -591,9 +667,9 @@ mod tests {
     #[test]
     fn test_evaluate_rejects_every_truncation() {
         let full = descriptor_bytes(&format!("O:{ALICE}D:P(A;;FA;;;{ALICE})(A;;FW;;;WD)"));
-        assert!(evaluate(&full, &ALICE_BYTES).is_ok());
+        assert!(evaluate(&full, &ALICE_BYTES, Object::File).is_ok());
         for len in 0..full.len() {
-            let err = evaluate(&full[..len], &ALICE_BYTES);
+            let err = evaluate(&full[..len], &ALICE_BYTES, Object::File);
             assert!(
                 err.as_ref()
                     .is_err_and(|e| e.kind() == io::ErrorKind::InvalidData),
@@ -630,7 +706,7 @@ mod tests {
         far[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
         cases.push(("DACL offset past the end", far));
         for (what, bytes) in cases {
-            let err = evaluate(&bytes, &ALICE_BYTES);
+            let err = evaluate(&bytes, &ALICE_BYTES, Object::File);
             assert!(
                 err.as_ref()
                     .is_err_and(|e| e.kind() == io::ErrorKind::InvalidData),
@@ -646,7 +722,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("path-lib-access-{label}-{}", std::process::id()));
         drop(std::fs::remove_dir_all(&dir));
-        super::super::private_dir::create(&dir).unwrap();
+        super::super::private_dir::create(&dir, false).unwrap();
         dir
     }
 
