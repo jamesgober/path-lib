@@ -27,6 +27,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::Error;
 
+#[cfg(windows)]
+mod access;
 mod basic;
 mod find;
 mod guard;
@@ -34,6 +36,8 @@ mod remove;
 mod transfer;
 mod write;
 
+#[cfg(windows)]
+pub use access::{FileAccess, file_access};
 pub(crate) use basic::{create_dir, create_private_dir};
 pub use basic::{exists, list, make_dir, make_file};
 pub use find::find;

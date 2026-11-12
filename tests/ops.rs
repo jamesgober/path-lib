@@ -632,3 +632,21 @@ fn test_make_file_in_read_only_directory_reports_io() {
         "{r:?}"
     );
 }
+
+// --- file_access (Windows) -------------------------------------------------
+
+#[cfg(windows)]
+#[test]
+fn test_file_access_on_a_private_config_reports_nobody_else() {
+    use path_lib::{App, Kind};
+    let sb = Sandbox::new("file-access");
+    let app = App::portable("demo", sb.path()).unwrap();
+    let config = app.ensure_private(Kind::Config).unwrap().join("app.conf");
+    path_lib::write_atomic(&config, "port = 7000\n").unwrap();
+    let file = fs::File::open(&config).unwrap();
+    let access = path_lib::file_access(&file).unwrap();
+    assert!(access.enforced, "{access:?}");
+    assert!(access.owner_trusted, "{access:?}");
+    assert!(!access.others_can_write, "{access:?}");
+    assert!(!access.others_can_read, "{access:?}");
+}

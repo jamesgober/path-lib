@@ -11,6 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-11-12
+
+### Added
+
+- `file_access(&file)` and `FileAccess` (Windows only): who besides the
+  current user, `SYSTEM`, and `Administrators` can change or read an open
+  file, read from the handle with `GetSecurityInfo` rather than from the
+  path, so the file checked is the file read. `FileAccess` reports whether
+  the volume keeps access control lists at all (`enforced`), whether the
+  owner is trusted (`owner_trusted`), and whether the DACL grants another
+  account a write right (`others_can_write`) or a read right
+  (`others_can_read`). Only allow entries that apply to the file are
+  counted and deny entries are ignored, so the answer can overstate what
+  others can do, never understate it. A NULL DACL reports both rights; on
+  a volume without access control lists every field holds the unsafe
+  answer. The security descriptor is parsed as a bounds-checked byte
+  slice; a malformed one fails with `InvalidData`.
+- docs.rs builds the Windows target as well, so `file_access` is
+  documented there.
+
+Nothing else changes; the crate still has no dependencies.
+
+---
+
 ## [1.1.1] - 2026-10-23
 
 ### Fixed
@@ -125,7 +149,8 @@ Initial release.
 - Unit, integration, and property tests; criterion benchmarks; CI for
   Linux, macOS, and Windows on stable and MSRV 1.85.
 
-[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/jamesgober/path-lib/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/jamesgober/path-lib/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/jamesgober/path-lib/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/jamesgober/path-lib/compare/v0.1.0...v1.0.0
