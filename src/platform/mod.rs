@@ -28,7 +28,9 @@ mod windows;
 #[cfg(all(windows, test))]
 pub(crate) use windows::private_dir_dacl;
 #[cfg(windows)]
-pub(crate) use windows::{SystemBases, UserBases, create_private_dir, file_access};
+pub(crate) use windows::{
+    SystemBases, UserBases, create_protected_dir, dir_access, file_access, set_private_file_dacl,
+};
 
 #[cfg(target_os = "macos")]
 mod macos;

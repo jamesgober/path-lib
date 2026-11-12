@@ -11,6 +11,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-11-12
+
+Security release. Directories and files the crate creates, or is asked to
+use, are now checked for who owns them and who else can change them.
+
+### Security
+
+- **Existing directories are checked before use.** `App::ensure`,
+  `ensure_all`, `create`, `ensure_private`, and `create_private` used to
+  accept any directory that already existed, so a user who created
+  `%ProgramData%\<app>`, `/var/tmp/<app>`, or `/tmp/<app>` (macOS) first
+  controlled the files the application later wrote there. Every existing
+  directory of the application is now checked: the kind's directory, the
+  kind it is nested in (for example `%ProgramData%\<app>` for the global
+  config), and every component of `sub`. Each must be owned by the current
+  user or an administrator account (root; `SYSTEM` or `Administrators`)
+  and must not be writable by other accounts. `ensure_private` and
+  `create_private` also require the final directory to be unreadable by
+  other accounts. A directory that fails is refused with `Error::Refused`
+  and a reason that says what to fix; it is never changed. On Windows the
+  DACL is read from a directory handle, and entries that are only
+  inherited by new children count too, since every file created inside
+  would grant them. A portable layout on a Windows volume without access
+  control lists (FAT, exFAT) is accepted.
+- **Windows global directories are no longer writable by every user.**
+  `ensure` and `create` in `Scope::Global` created directories that
+  inherited the `%ProgramData%` list, which lets `Users` create files and
+  folders in them. They now get a protected list: full control for the
+  current user, `SYSTEM`, and `Administrators`, and read and list access
+  for `Users`, the counterpart of mode `0755`. User and portable
+  directories get the private list `ensure_private` uses, the counterpart
+  of `0700`.
+- **Links in the middle of a sub-path are refused.** `create(kind, "a/b")`
+  with a symbolic link or junction at `a` created `b` wherever the link
+  pointed. Directories are now created one component at a time, and a
+  link at any component below the application's directory is refused.
+- **`write_atomic` no longer exposes the new contents on Unix.** The
+  temporary file was created with the default mode (usually `0644`) and
+  narrowed only after the contents were written, so another user could
+  open it in that window and keep reading. It is now created exclusively
+  with mode `0600` and receives the final bits on the handle once the
+  contents are written and flushed. The existing owner and group are kept
+  when the process may set them.
+- **macOS user temp never falls back to the shared `/tmp`.** Without
+  `TMPDIR` (launchd jobs, cron, `sudo`), user temp was `/tmp/<app>`. It is
+  now the per-user directory `confstr(_CS_DARWIN_USER_TEMP_DIR)` returns,
+  which is where `TMPDIR` normally comes from, and
+  `~/Library/Caches/TemporaryItems/<app>` if that fails.
+
+### Added
+
+- `check_owner(path, others)`, `check_owner_private(path)`, and the
+  `Others` enum (`MayRead`, `NoAccess`): refuse a file or directory with
+  an untrusted owner or that other accounts can change (or, with
+  `NoAccess`, read). Unix checks the owner and the group and other bits;
+  Windows checks the owner and the DACL. Everything is read from an open
+  handle, the final component is never followed, and on Unix the handle
+  is compared with the path's device and inode.
+- `open_checked(path, others)`: the same checks on a regular file,
+  returning the handle opened for reading, so the file checked is the file
+  read. On Unix it opens without blocking, so a FIFO is refused instead of
+  hanging the caller.
+- `write_atomic_private(path, contents)`: `write_atomic` for secrets. The
+  result is `0600` on Unix; on Windows the temporary file is opened with
+  no sharing and given a protected list (current user, `SYSTEM`,
+  `Administrators`) before anything is written. Missing parents are
+  created private.
+- `App::clear(kind)`: deletes everything inside a kind's directory and
+  keeps the directories of other kinds nested in it.
+
+### Changed
+
+- `App::remove(kind, sub)` refuses a path that is, or contains, the
+  directory of another kind. Kinds nest (on Windows cache, logs, state,
+  and runtime are inside data; on Linux logs are inside state), so
+  `remove(Kind::Data, "")` deleted all of them. Use `App::clear` to empty
+  a directory while keeping the nested kinds.
+- `copy` gives each copied directory the permission bits of its source on
+  Unix, so a `0700` tree is no longer copied as `0755`.
+
+### Documentation
+
+- `make_dir`, `make_file`, and the parents `write_atomic` creates do not
+  check existing directories; the docs now say so and point to the `App`
+  methods and `check_owner`.
+- `expand_home` is not a confinement check: `~/../x` can leave the home
+  directory. The docs now say so.
+- `find`'s matcher was described as linear-time; it is bounded by pattern
+  length times name length.
+- The README no longer says that no kind can wipe another; it describes
+  the nesting and the new `remove` rule.
+
+### Upgrading
+
+A directory that an earlier version created and that another account can
+write to is now refused. The usual case is a Windows global directory
+made by 1.2 or earlier, which inherits the `%ProgramData%` list. Delete
+the directory and let `ensure` create it again, or remove the access other
+accounts have to it; the reason in the error says which check failed.
+
+---
+
 ## [1.2.0] - 2026-11-12
 
 ### Added
@@ -149,7 +251,8 @@ Initial release.
 - Unit, integration, and property tests; criterion benchmarks; CI for
   Linux, macOS, and Windows on stable and MSRV 1.85.
 
-[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/jamesgober/path-lib/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/jamesgober/path-lib/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jamesgober/path-lib/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/jamesgober/path-lib/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/jamesgober/path-lib/compare/v1.0.0...v1.1.0

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Reason, Result};
 use crate::join::{clean, join_impl};
 use crate::kind::{Kind, Scope};
+use crate::ops::{NewDir, Others};
 use crate::platform::Layout;
 use crate::{ops, os, rules};
 
@@ -384,22 +385,43 @@ impl App {
 
     /// Creates the directory for `kind` if it is missing, and returns it.
     ///
-    /// On Unix, directories created for [`Scope::User`] and
-    /// [`Scope::Portable`] are private to the owner (mode `0700`);
-    /// [`Scope::Global`] directories are world-readable (`0755`), as
-    /// system services expect. A symbolic link where the directory should
-    /// be is refused rather than followed, so a link planted in a shared
-    /// location cannot redirect the application's files.
+    /// Directories created for [`Scope::User`] and [`Scope::Portable`]
+    /// are private to the owner: mode `0700` on Unix, and on Windows a
+    /// protected access control list for the current user, `SYSTEM`, and
+    /// `Administrators`. [`Scope::Global`] directories are readable by
+    /// every local user but writable only by those accounts: mode `0755`
+    /// on Unix, and on Windows the same list plus read access for
+    /// `Users`, instead of the `%ProgramData%` default that lets every
+    /// user create files.
+    ///
+    /// Directories of the application that already exist are checked
+    /// before they are used: the kind's directory, the directory it is
+    /// nested in (such as `%ProgramData%\<app>` for the global config),
+    /// and everything between. Each must be owned by the current user or
+    /// an administrator account (root; `SYSTEM` or `Administrators`) and
+    /// must not be writable by other accounts (see
+    /// [`check_owner`](crate::check_owner) with
+    /// [`Others::MayRead`](crate::Others::MayRead)). A directory another
+    /// user created first in a shared location, such as `%ProgramData%`,
+    /// `/var/tmp`, or `/tmp`, is refused rather than used. A portable
+    /// layout on a Windows volume without access control lists (FAT,
+    /// exFAT) is accepted, since the caller chose that location.
+    ///
+    /// A symbolic link or junction at any of those directories is refused
+    /// rather than followed, so a link planted in a shared location cannot
+    /// redirect the application's files. Directories above them (`/var`,
+    /// `%ProgramData%`) are not checked.
     ///
     /// # Errors
     ///
-    /// - [`Error::Refused`] if a symbolic link occupies the path.
+    /// - [`Error::Refused`] if a symbolic link occupies one of the paths,
+    ///   or an existing directory fails the check; `reason` says which.
     /// - [`Error::AlreadyExists`] if a file occupies the path.
-    /// - [`Error::Io`] if the directory cannot be created, for example
-    ///   when a global directory is created without privileges.
+    /// - [`Error::Io`] if the directory cannot be created or checked, for
+    ///   example when a global directory is created without privileges.
     pub fn ensure(&self, kind: Kind) -> Result<&Path> {
         let dir = self.dir(kind);
-        ops::create_dir(dir, Some(self.dir_mode()))?;
+        self.create_checked(kind, dir, Others::MayRead, self.new_dir())?;
         Ok(dir)
     }
 
@@ -419,8 +441,10 @@ impl App {
     /// Creates a sub-directory (and any missing parents) inside the
     /// directory for `kind`, and returns its path.
     ///
-    /// Uses the same permissions and symbolic-link rules as
-    /// [`ensure`](App::ensure).
+    /// Uses the same permissions, checks, and symbolic-link rules as
+    /// [`ensure`](App::ensure), applied to every component of `sub` as
+    /// well: `create(kind, "a/b")` refuses a link at `a`, rather than
+    /// creating `b` wherever it points.
     ///
     /// # Errors
     ///
@@ -428,7 +452,7 @@ impl App {
     /// [`ensure`](App::ensure).
     pub fn create(&self, kind: Kind, sub: impl AsRef<str>) -> Result<PathBuf> {
         let path = self.at(kind, sub)?;
-        ops::create_dir(&path, Some(self.dir_mode()))?;
+        self.create_checked(kind, &path, Others::MayRead, self.new_dir())?;
         Ok(path)
     }
 
@@ -447,12 +471,16 @@ impl App {
     ///   created, so it is never open, even briefly.
     ///
     /// Missing parents are created the same way. A directory that already
-    /// exists is left as it is. A symbolic link where the directory should
-    /// be is refused.
+    /// exists is checked as by [`ensure`](App::ensure), and the kind's
+    /// directory itself must also be unreadable by other accounts (see
+    /// [`check_owner`](crate::check_owner) with
+    /// [`Others::NoAccess`](crate::Others::NoAccess)); its access is never
+    /// changed. A symbolic link where a directory should be is refused.
     ///
     /// # Errors
     ///
-    /// As for [`ensure`](App::ensure).
+    /// As for [`ensure`](App::ensure); also [`Error::Refused`] if the
+    /// existing directory is readable by other accounts.
     ///
     /// # Examples
     ///
@@ -474,12 +502,14 @@ impl App {
     /// ```
     pub fn ensure_private(&self, kind: Kind) -> Result<&Path> {
         let dir = self.dir(kind);
-        ops::create_private_dir(dir)?;
+        self.create_checked(kind, dir, Others::NoAccess, NewDir::Private)?;
         Ok(dir)
     }
 
-    /// Like [`create`](App::create), with the permissions of
-    /// [`ensure_private`](App::ensure_private).
+    /// Like [`create`](App::create), with the permissions and checks of
+    /// [`ensure_private`](App::ensure_private). The final directory must
+    /// be private; the ones above it must pass the checks of
+    /// [`ensure`](App::ensure).
     ///
     /// # Errors
     ///
@@ -500,7 +530,7 @@ impl App {
     /// ```
     pub fn create_private(&self, kind: Kind, sub: impl AsRef<str>) -> Result<PathBuf> {
         let path = self.at(kind, sub)?;
-        ops::create_private_dir(&path)?;
+        self.create_checked(kind, &path, Others::NoAccess, NewDir::Private)?;
         Ok(path)
     }
 
@@ -519,12 +549,80 @@ impl App {
     /// An empty `sub` deletes the base directory itself (useful to clear
     /// a cache). Returns `Ok(false)` if nothing was there.
     ///
+    /// Some kinds nest inside others (on Windows the cache, logs, state,
+    /// and runtime directories are inside the data directory; on Linux
+    /// the logs are inside the state directory), so a path that is, or
+    /// contains, the directory of another kind is refused rather than
+    /// deleted with it. Use [`clear`](App::clear) to empty a directory
+    /// while keeping the kinds nested in it.
+    ///
     /// # Errors
     ///
-    /// [`Error::InvalidPath`] for an unsafe `sub`, otherwise as for
-    /// [`remove`](crate::remove).
+    /// - [`Error::InvalidPath`] for an unsafe `sub`.
+    /// - [`Error::Refused`] if the path is or contains the directory of
+    ///   another kind.
+    /// - Otherwise as for [`remove`](crate::remove).
     pub fn remove(&self, kind: Kind, sub: impl AsRef<str>) -> Result<bool> {
-        ops::remove(self.at(kind, sub)?)
+        let path = self.at(kind, sub)?;
+        if let Some(other) = self.kind_within(kind, &path) {
+            return Err(Error::Refused {
+                path,
+                reason: contains_reason(other),
+            });
+        }
+        ops::remove(path)
+    }
+
+    /// Deletes everything inside the directory for `kind`, keeping the
+    /// directory itself and the directories of other kinds nested in it
+    /// (with their contents). Returns how many entries were deleted; a
+    /// missing directory has none.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Refused`] if the directory for `kind` is a symbolic
+    ///   link.
+    /// - Otherwise as for [`list`](crate::list) and
+    ///   [`remove`](crate::remove). Entries deleted before a failure stay
+    ///   deleted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use path_lib::{App, Kind};
+    ///
+    /// let root = std::env::temp_dir().join("path-lib-doc-clear");
+    /// let app = App::portable("demo", &root)?;
+    /// let data = app.ensure(Kind::Data)?;
+    /// std::fs::write(data.join("a.db"), b"x").unwrap();
+    /// assert_eq!(app.clear(Kind::Data)?, 1);
+    /// assert!(data.is_dir());
+    /// # path_lib::remove(&root)?;
+    /// # Ok::<(), path_lib::Error>(())
+    /// ```
+    pub fn clear(&self, kind: Kind) -> Result<usize> {
+        let base = self.dir(kind);
+        match std::fs::symlink_metadata(base) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(Error::Refused {
+                    path: base.to_path_buf(),
+                    reason: "it is a symbolic link, not a directory",
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(Error::io("inspect", base, e)),
+        }
+        let mut removed = 0usize;
+        for entry in ops::list(base)? {
+            if self.kind_within(kind, &entry).is_some() {
+                continue;
+            }
+            if ops::remove(&entry)? {
+                removed = removed.saturating_add(1);
+            }
+        }
+        Ok(removed)
     }
 
     /// Finds entries whose name matches `pattern` anywhere under the
@@ -537,10 +635,67 @@ impl App {
         ops::find(self.dir(kind), pattern)
     }
 
-    fn dir_mode(&self) -> u32 {
+    /// How directories created by `ensure` and `create` are protected.
+    fn new_dir(&self) -> NewDir {
         match self.scope {
-            Scope::Global => 0o755,
-            Scope::User | Scope::Portable => 0o700,
+            Scope::Global => NewDir::SharedRead,
+            Scope::User | Scope::Portable => NewDir::Private,
+        }
+    }
+
+    /// Creates `path` (the directory for `kind` or below it), checking
+    /// every existing directory from the kind's outermost directory down.
+    fn create_checked(&self, kind: Kind, path: &Path, leaf: Others, new: NewDir) -> Result<()> {
+        ops::create_app_dir(
+            path,
+            self.anchor(kind),
+            new,
+            leaf,
+            self.scope == Scope::Portable,
+        )
+    }
+
+    /// The outermost directory of this application that contains the
+    /// directory for `kind`: the kind's own directory, or the directory of
+    /// the kind it is nested in (data, for the Windows cache).
+    fn anchor(&self, kind: Kind) -> &Path {
+        let dir = self.dir(kind);
+        Kind::ALL
+            .iter()
+            .map(|k| self.dir(*k))
+            .filter(|d| dir.starts_with(d))
+            .min_by_key(|d| d.components().count())
+            .unwrap_or(dir)
+    }
+
+    /// A kind other than `kind` whose directory is `path` or inside it.
+    fn kind_within(&self, kind: Kind, path: &Path) -> Option<Kind> {
+        Kind::ALL
+            .into_iter()
+            .find(|k| *k != kind && self.dir(*k).starts_with(path))
+    }
+}
+
+/// Why [`App::remove`] refused a path that holds another kind.
+fn contains_reason(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Data => "it contains the data directory; remove inside it instead, or use App::clear",
+        Kind::Config => {
+            "it contains the config directory; remove inside it instead, or use App::clear"
+        }
+        Kind::Cache => {
+            "it contains the cache directory; remove inside it instead, or use App::clear"
+        }
+        Kind::Logs => "it contains the logs directory; remove inside it instead, or use App::clear",
+        Kind::State => {
+            "it contains the state directory; remove inside it instead, or use App::clear"
+        }
+        Kind::Runtime => {
+            "it contains the runtime directory; remove inside it instead, or use App::clear"
+        }
+        Kind::Temp => "it contains the temp directory; remove inside it instead, or use App::clear",
+        Kind::Documents => {
+            "it contains the documents directory; remove inside it instead, or use App::clear"
         }
     }
 }
@@ -720,13 +875,48 @@ mod tests {
     }
 
     #[test]
-    fn test_dir_mode_by_scope() {
+    fn test_new_dir_by_scope() {
         let mut app = sandbox_app();
-        assert_eq!(app.dir_mode(), 0o700);
+        assert_eq!(app.new_dir(), NewDir::Private);
         app.scope = Scope::Global;
-        assert_eq!(app.dir_mode(), 0o755);
+        assert_eq!(app.new_dir(), NewDir::SharedRead);
         app.scope = Scope::User;
-        assert_eq!(app.dir_mode(), 0o700);
+        assert_eq!(app.new_dir(), NewDir::Private);
+    }
+
+    #[test]
+    fn test_anchor_is_the_outermost_containing_kind() {
+        let app = sandbox_app()
+            .with_dir(Kind::Cache, abs("d").join("cache"))
+            .unwrap()
+            .with_dir(Kind::Data, abs("d"))
+            .unwrap();
+        assert_eq!(app.anchor(Kind::Cache), abs("d"));
+        assert_eq!(app.anchor(Kind::Data), abs("d"));
+        assert_eq!(app.anchor(Kind::Logs), app.dir(Kind::Logs));
+    }
+
+    #[test]
+    fn test_kind_within_finds_nested_and_equal_kinds() {
+        let app = sandbox_app()
+            .with_dir(Kind::Data, abs("d"))
+            .unwrap()
+            .with_dir(Kind::Logs, abs("d").join("logs"))
+            .unwrap();
+        assert_eq!(app.kind_within(Kind::Data, &abs("d")), Some(Kind::Logs));
+        assert_eq!(
+            app.kind_within(Kind::Data, &abs("d").join("logs")),
+            Some(Kind::Logs)
+        );
+        assert_eq!(app.kind_within(Kind::Data, &abs("d").join("db")), None);
+        assert_eq!(app.kind_within(Kind::Logs, &abs("d").join("logs")), None);
+    }
+
+    #[test]
+    fn test_every_kind_has_a_contains_reason() {
+        for kind in Kind::ALL {
+            assert!(contains_reason(kind).contains(kind.name()), "{kind}");
+        }
     }
 
     #[test]
@@ -824,16 +1014,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_ensure_private_leaves_an_existing_directory_alone() {
+    fn test_ensure_private_refuses_an_open_existing_directory_and_leaves_it() {
         use std::os::unix::fs::PermissionsExt;
         let root = private_root("existing");
         let app = App::portable("demo", &root).unwrap();
         let dir = app.dir(Kind::Cache).to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _same = app.ensure_private(Kind::Cache).unwrap();
+        // Readable by others: not private, so refused, and not changed.
+        assert!(matches!(
+            app.ensure_private(Kind::Cache),
+            Err(Error::Refused { .. })
+        ));
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);
+        // An existing private directory is accepted as it is.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let _same = app.ensure_private(Kind::Cache).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }
 

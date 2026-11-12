@@ -18,7 +18,7 @@
 </div>
 <br>
 
-> **Status:** This reference tracks the public surface of `path-lib` **1.2.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
+> **Status:** This reference tracks the public surface of `path-lib` **1.3.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
 
 ## Table of Contents
 
@@ -37,6 +37,7 @@
 - [Validation Rules](#validation-rules)
 - [Filesystem Operations](#filesystem-operations)
   - [`write_atomic`](#write_atomic)
+  - [Owner and permission checks](#owner-and-permission-checks)
   - [`file_access`](#file_access)
 - [Errors](#errors)
   - [Reasons](#reasons)
@@ -146,17 +147,31 @@ assert_eq!(p, q);
 | `ensure_private(kind)` | Like `ensure`, but private to the current user on every OS (since 1.1) |
 | `create_private(kind, sub)` | Like `create`, with the permissions of `ensure_private` (since 1.1) |
 | `list(kind, sub)` | Sorted entries of a sub-directory |
-| `remove(kind, sub)` | Deletes a sub-path; empty `sub` clears the whole kind |
+| `remove(kind, sub)` | Deletes a sub-path; empty `sub` deletes the kind's directory. Refuses a path that is or holds another kind's directory (since 1.3) |
+| `clear(kind)` | Deletes everything inside the kind's directory except other kinds nested in it; returns the count (since 1.3) |
 | `find(kind, pattern)` | Name search under the kind's directory |
 
-On Unix, `ensure` and `create` create user and portable directories with mode `0700` and global ones with `0755`. Both refuse a symbolic link where the directory should be, so a link planted in a shared location cannot redirect the application's files.
+`ensure` and `create` create user and portable directories private to the owner, and global ones readable but not writable by other users:
+
+| | User and portable | Global |
+|---|---|---|
+| Unix | mode `0700` | mode `0755` |
+| Windows (since 1.3) | protected list: current user, `SYSTEM`, `Administrators` | the same plus read and list for `Users` |
+
+Before 1.3, Windows directories inherited the parent's list, which under `%ProgramData%` lets every local user create files and folders.
+
+**Existing directories are checked (since 1.3).** Before an existing directory of the application is used, it must be owned by the current user or an administrator account (root on Unix; `SYSTEM` or `Administrators` on Windows), and other accounts must not be able to write to it: no group or other write bit on Unix, no DACL entry granting another account a write right on Windows (entries inherited by new children included). This applies to the kind's directory, to the kind it is nested in (the Windows global config is inside `%ProgramData%\<app>`), and to every component of `sub` in `create`. Anything else is refused with `Error::Refused` and a reason that says what is wrong; the directory is not changed. So a directory another user created first in a shared location (`%ProgramData%`, `/var/tmp`, `/tmp` on macOS) cannot take over the application's files. A portable layout on a Windows volume without access control lists (FAT, exFAT) is accepted. Directories above the application's own (`/var`, `%ProgramData%`) are not checked.
+
+A symbolic link or junction where one of those directories should be is refused rather than followed, so a link planted in a shared location cannot redirect the application's files. Since 1.3 that includes links in the middle of `sub`: `create(kind, "a/b")` refuses a link at `a`.
+
+Some kinds nest inside others: on Windows cache, logs, state, and runtime live inside data; on Linux logs live inside state and temp inside cache; on macOS state and runtime live inside data. `remove` refuses a path that would delete another kind with it; `clear` empties a directory and keeps the nested kinds.
 
 `ensure_private` and `create_private` (since 1.1) are for directories other users must not read, such as logs, audit records, crash reports, and keys, in every scope:
 
 - **Unix:** mode `0700` (subject to the umask), also for `Scope::Global`.
 - **Windows:** a protected access control list, set when the directory is created: full control for the current user, `SYSTEM`, and `Administrators`, nothing for anyone else, no inheritance from the parent, and inherited by everything created inside.
 
-Missing parents are created the same way; a directory that already exists is left as it is.
+Missing parents are created the same way. A directory that already exists must pass the checks above, and the kind's directory itself must also be unreadable by other accounts (no group or other bits on Unix; no read right for another account on Windows). Its access is never changed: a directory that fails is refused.
 
 <br>
 
@@ -221,6 +236,8 @@ Relative `XDG_*` values are ignored, as the specification requires. User temp is
 | runtime | `<data>/run` | `/var/run/<app>` |
 | temp | `$TMPDIR/<app>` (per-user) | `/var/tmp/<app>` |
 | documents | `~/Documents/<app>` | `/Users/Shared/<app>` |
+
+`TMPDIR` is a per-user directory under `/var/folders`. When a process starts without it (launchd jobs, cron, `sudo`), user temp uses the same directory from `confstr(_CS_DARWIN_USER_TEMP_DIR)` (since 1.3; before, the shared `/tmp`), and `~/Library/Caches/TemporaryItems` only if that fails.
 
 ### Windows
 
@@ -340,6 +357,10 @@ Every rule applies on every platform, so a path accepted on Linux is also valid 
 | `move_to(from, to)` | Atomic rename, or copy then delete across volumes |
 | `find(root, pattern)` | Recursive name search with `*` and `?`; sorted |
 | `write_atomic(path, contents)` | Replaces a file's contents atomically; creates the file and its parents if missing |
+| `write_atomic_private(path, contents)` | `write_atomic` for secrets: the result is private to the current user (since 1.3) |
+| `check_owner(path, others)` | Refuses a file or directory with an untrusted owner, or that other accounts can change (or read) (since 1.3) |
+| `check_owner_private(path)` | `check_owner` with `Others::NoAccess` (since 1.3) |
+| `open_checked(path, others)` | Opens a regular file for reading after `check_owner`'s checks on the handle (since 1.3) |
 | `file_access(&file)` | Windows only: whether other accounts can change or read an open file (since 1.2) |
 
 Guarantees:
@@ -348,7 +369,8 @@ Guarantees:
 - **No link following.** `remove` deletes a link, never its target. `find` lists links but does not descend into them. `copy` refuses trees containing links or special files.
 - **Protected paths.** `remove` and `move_to` refuse filesystem roots, top-level directories (`/usr`, `C:\Users`), the home directory and its parents, the user's standard folders, and the OS temp directory. Checks compare case-insensitively on Windows and macOS and are repeated on the symlink-resolved form.
 - **Atomic copies.** A copy is built under a hidden sibling name and renamed into place only when complete; on failure the partial copy is deleted.
-- **Bounded walks.** Trees deeper than `MAX_WALK_DEPTH` (256) are refused; walks are iterative, so depth never threatens the stack. Pattern matching is linear-time.
+- **Bounded walks.** Trees deeper than `MAX_WALK_DEPTH` (256) are refused; walks are iterative, so depth never threatens the stack. Matching one name against a pattern takes at most `pattern length * name length` steps, both capped at 255 bytes.
+- **Unchecked by design.** `make_dir`, `make_file`, and the parent directories `write_atomic` creates take any path, so they do not check the owner or permissions of directories that already exist. Use the `App` methods, or `check_owner`, for directories that may be shared.
 
 Checks and actions are separate system calls, so another process can change the filesystem between them. The guards prevent mistakes, not a hostile process racing this one in the same directory.
 
@@ -368,12 +390,37 @@ assert_eq!(std::fs::read_to_string(&file).unwrap(), "port = 7001\n");
 
 The contents are written to a hidden temporary sibling, flushed to disk with `sync_all`, and renamed over `path`. A reader sees either the old file or the complete new one, never a partial write, even if the process or machine fails midway. On Unix the parent directory is flushed after the rename, so the rename itself survives a power loss. Missing parent directories are created.
 
-- **Permissions.** On Unix an existing file's permission bits are copied to the new file, so a `0600` file stays `0600`. A new file gets the process default. On Windows the file inherits the directory's access control list.
+- **Permissions.** On Unix an existing file's permission bits are copied to the new file, so a `0600` file stays `0600`. Since 1.3 the temporary file is created with mode `0600` and receives the final bits only after the contents are written, and the existing owner and group are kept when the process may set them (root, or a group the user belongs to). A new file gets the process default. On Windows the file inherits the directory's access control list.
 - **Symbolic links.** If `path` is a link, the file it points to is replaced and the link is kept.
 - **Refused.** A directory, a broken symbolic link, or a path without a file name fails with `Refused`.
 - **Failure.** On any error the temporary file is removed and the original file is untouched.
 
 It is the one operation in the crate whose purpose is to overwrite. Use it for configuration, state, and other files that must never be seen half-written.
+
+`write_atomic_private` (since 1.3) is the same for secrets, new or existing. On Unix the result is `0600`, created that way. On Windows the temporary file is opened with no sharing and given a protected list (current user, `SYSTEM`, `Administrators`) before anything is written; the rename keeps it. Missing parents are created private.
+
+### Owner and permission checks
+
+Since 1.3. `check_owner(path, others)` refuses a file or directory unless it is owned by the current user or an administrator account (root on Unix; `SYSTEM` or `Administrators` on Windows) and other accounts can do no more than `others` allows:
+
+| `Others` | Unix | Windows |
+|---|---|---|
+| `MayRead` | no group or other write bit | no DACL entry grants another account a write right |
+| `NoAccess` | no group or other bit at all | no entry grants another account a write or read right |
+
+Everything is read from an open handle, and the final component is never followed: a symbolic link, junction, or special file is refused. On Unix the handle is compared with the path's own device and inode, so an entry swapped in between is refused too. For a directory on Windows, entries that only pass rights on to new children count as well (`CREATOR OWNER` excepted, since it becomes the creator), and a volume without access control lists fails. `Users`, `Authenticated Users`, and `Everyone` count as other accounts, because other users belong to them.
+
+`open_checked(path, others)` makes the same checks on a regular file and returns the handle opened for reading, so the file checked is the file read. On Unix it opens without blocking, so a FIFO planted where a configuration file should be is refused instead of hanging the program.
+
+```rust
+use std::io::Read as _;
+use path_lib::Others;
+
+let mut text = String::new();
+path_lib::open_checked(&env_file, Others::NoAccess)?.read_to_string(&mut text)?;
+```
+
+`check_owner_private(path)` is `check_owner(path, Others::NoAccess)`. The `App` methods that create directories use the same checks.
 
 ### `file_access`
 
@@ -419,7 +466,7 @@ All fallible functions return `path_lib::Result<T>`.
 | `Unresolved { dir }` | The OS did not report a directory | Set `HOME`, or use `App::global` / `App::portable` |
 | `AlreadyExists { path }` | Destination is taken | Remove it first or pick another |
 | `NotFound { path }` | Source is missing | Check the path |
-| `Refused { path, reason }` | A guard blocked a dangerous operation | Nothing was changed; reconsider the operation |
+| `Refused { path, reason }` | A guard blocked a dangerous operation, or an existing file or directory failed an owner or permission check | Nothing was changed; `reason` says what to fix |
 | `Io { op, path, source }` | The OS reported an error | Usually permissions or disk space |
 
 `error.reason()` returns the `Reason` for input errors. Caller input echoed in an error is truncated to 96 characters (`PREVIEW_CHARS`) and printed with escapes. `Error` is `#[non_exhaustive]`.
@@ -447,4 +494,4 @@ The [validation rules](#validation-rules) list the reasons `join` and the `*_at`
 
 **Testability.** Every platform table is resolved through an injected environment lookup, so the rules are unit-tested against arbitrary (including hostile) environments without touching the real one.
 
-**`unsafe` only at the Windows boundary.** Windows Known Folders need `SHGetKnownFolderPath`, private directories need a security descriptor for `CreateDirectoryW`, and `file_access` needs `GetSecurityInfo`. The crate declares these functions directly instead of depending on `windows-sys`; every `unsafe` block carries a `SAFETY` comment, the security descriptor read by `file_access` is parsed as a bounds-checked byte slice, and the crate root denies `unsafe_code` everywhere else.
+**`unsafe` only at the system boundary.** Windows Known Folders need `SHGetKnownFolderPath`, private directories need a security descriptor for `CreateDirectoryW`, private files need `SetSecurityInfo`, and `file_access` needs `GetSecurityInfo`. On Unix the owner check needs `geteuid`, and macOS user temp without `TMPDIR` needs `confstr`. The crate declares these functions directly instead of depending on `windows-sys` or `libc`; every `unsafe` block carries a `SAFETY` comment, the security descriptor read by `file_access` is parsed as a bounds-checked byte slice, and the crate root denies `unsafe_code` everywhere else.

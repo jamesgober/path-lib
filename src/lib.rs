@@ -112,11 +112,24 @@
 //! either the old contents or the complete new contents, never a partial
 //! write.
 //!
-//! On Windows, `file_access` reports whether accounts other than the
-//! current user, `SYSTEM`, and `Administrators` can change or read an open
-//! file, read from the handle rather than the path. Check configuration
-//! and secret files with it before reading them; on Unix the same check is
-//! the mode and owner of the open descriptor.
+//! [`write_atomic_private`] does the same for secrets: the result is
+//! private to the current user (`0600` on Unix, a protected access
+//! control list on Windows), and the contents are never in a file other
+//! accounts can open.
+//!
+//! # Owner and permission checks
+//!
+//! [`check_owner`] refuses a file or directory that is owned by an
+//! untrusted account, or that other accounts can change (and, with
+//! [`Others::NoAccess`], read): the mode and owner on Unix, the owner and
+//! DACL on Windows, read from the open handle. [`open_checked`] does the
+//! same for a configuration or secret file and returns the checked handle
+//! to read from. [`App::ensure`] and the other `App` methods that create
+//! directories run the same check on every directory of the application
+//! that already exists, so a directory another user created first in a
+//! shared location such as `%ProgramData%` or `/var/tmp` is refused
+//! rather than used. On Windows, `file_access` reports the raw answer for
+//! an open file.
 //!
 //! ```
 //! let file = std::env::temp_dir().join("path-lib-doc-crate").join("app.conf");
@@ -173,7 +186,8 @@ pub use kind::{Kind, Scope};
 #[cfg(windows)]
 pub use ops::{FileAccess, file_access};
 pub use ops::{
-    MAX_WALK_DEPTH, copy, exists, find, list, make_dir, make_file, move_to, remove, write_atomic,
+    MAX_WALK_DEPTH, Others, check_owner, check_owner_private, copy, exists, find, list, make_dir,
+    make_file, move_to, open_checked, remove, write_atomic, write_atomic_private,
 };
 pub use os::{
     Os, desktop, documents, downloads, exe, exe_dir, expand_home, home, music, os, pictures, root,

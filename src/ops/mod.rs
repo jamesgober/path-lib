@@ -30,6 +30,7 @@ use crate::error::Error;
 #[cfg(windows)]
 mod access;
 mod basic;
+mod check;
 mod find;
 mod guard;
 mod remove;
@@ -38,12 +39,13 @@ mod write;
 
 #[cfg(windows)]
 pub use access::{FileAccess, file_access};
-pub(crate) use basic::{create_dir, create_private_dir};
+pub(crate) use basic::{NewDir, create_app_dir, create_dir};
 pub use basic::{exists, list, make_dir, make_file};
+pub use check::{Others, check_owner, check_owner_private, open_checked};
 pub use find::find;
 pub use remove::remove;
 pub use transfer::{copy, move_to};
-pub use write::write_atomic;
+pub use write::{write_atomic, write_atomic_private};
 
 // Shared between the submodules, which reach them through `super::`.
 use guard::{absolute, guard_destructive, is_within, resolve_lenient};
