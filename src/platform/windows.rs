@@ -420,6 +420,17 @@ pub(crate) fn create_private_dir(path: &Path) -> std::io::Result<()> {
     private_dir::create(path)
 }
 
+/// Reads who can change or read an open file (see
+/// [`file_access`](crate::file_access)).
+pub(crate) fn file_access(file: &std::fs::File) -> std::io::Result<crate::FileAccess> {
+    access::file_access(file)
+}
+
+/// The binding behind [`file_access`]: the volume flags, the file's
+/// security descriptor, and a bounds-checked walk of its DACL.
+#[allow(unsafe_code)]
+mod access;
+
 /// The DACL of `path` in SDDL form, for tests.
 #[cfg(test)]
 pub(crate) fn private_dir_dacl(path: &Path) -> String {
@@ -542,6 +553,18 @@ mod private_dir {
 
     /// The current user's SID in string form (`S-1-5-21-...`).
     pub(super) fn current_user_sid() -> io::Result<String> {
+        with_current_user_sid(|sid| {
+            // SAFETY: `with_current_user_sid` passes a pointer to a valid
+            // SID that stays alive for the whole closure.
+            unsafe { sid_string(sid) }
+        })
+    }
+
+    /// Runs `f` with a pointer to the current user's SID, read from the
+    /// process token. The pointer is valid only while `f` runs.
+    pub(super) fn with_current_user_sid<T>(
+        f: impl FnOnce(*mut c_void) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut token: *mut c_void = std::ptr::null_mut();
         // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no
         // closing; `token` is a valid out-pointer.
@@ -549,14 +572,17 @@ mod private_dir {
         if opened == 0 {
             return Err(io::Error::last_os_error());
         }
-        let sid = user_sid_string(token);
+        let result = with_token_user_sid(token, f);
         // SAFETY: `token` was opened above and is closed exactly once.
-        // A failure to close leaks one handle; the SID is still valid.
+        // A failure to close leaks one handle; the result is still valid.
         let _closed = unsafe { CloseHandle(token) };
-        sid
+        result
     }
 
-    fn user_sid_string(token: *mut c_void) -> io::Result<String> {
+    fn with_token_user_sid<T>(
+        token: *mut c_void,
+        f: impl FnOnce(*mut c_void) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut needed = 0u32;
         // SAFETY: a null buffer with length 0 asks for the size, which the
         // call writes to `needed`; the call is expected to fail here.
@@ -586,8 +612,18 @@ mod private_dir {
         // SAFETY: on success the buffer starts with a `TOKEN_USER`, whose
         // first member is a `SID_AND_ATTRIBUTES`, and it is 8-byte aligned.
         let sid = unsafe { (*buffer.as_ptr().cast::<SidAndAttributes>()).sid };
+        // `sid` points into `buffer`, which outlives the call.
+        f(sid)
+    }
+
+    /// The string form of a SID.
+    ///
+    /// # Safety
+    ///
+    /// `sid` must point to a valid SID that stays alive during the call.
+    unsafe fn sid_string(sid: *mut c_void) -> io::Result<String> {
         let mut string: *mut u16 = std::ptr::null_mut();
-        // SAFETY: `sid` points into `buffer`, which is still alive; `string`
+        // SAFETY: the caller guarantees `sid` is a live, valid SID; `string`
         // is a valid out-pointer.
         let converted = unsafe { ConvertSidToStringSidW(sid, &raw mut string) };
         if converted == 0 || string.is_null() {

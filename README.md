@@ -60,6 +60,7 @@
 - **Never overwrites**, **never follows links**, **refuses catastrophic deletes**
 - **Atomic copies** &mdash; staged under a temporary name, renamed into place when complete
 - **`write_atomic`** &mdash; replaces a file through a flushed temporary and a rename; keeps Unix permissions and symbolic links
+- **`file_access`** (Windows) &mdash; whether other accounts can change or read an open file, from its handle, before you trust its contents
 
 <hr>
 
@@ -67,7 +68,7 @@
 
 ```toml
 [dependencies]
-path-lib = "1.1"
+path-lib = "1.2"
 ```
 
 <hr>

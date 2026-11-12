@@ -112,6 +112,12 @@
 //! either the old contents or the complete new contents, never a partial
 //! write.
 //!
+//! On Windows, `file_access` reports whether accounts other than the
+//! current user, `SYSTEM`, and `Administrators` can change or read an open
+//! file, read from the handle rather than the path. Check configuration
+//! and secret files with it before reading them; on Unix the same check is
+//! the mode and owner of the open descriptor.
+//!
 //! ```
 //! let file = std::env::temp_dir().join("path-lib-doc-crate").join("app.conf");
 //! path_lib::write_atomic(&file, "port = 7000\n")?;
@@ -164,6 +170,8 @@ pub use app::{App, PORTABLE_MARKER};
 pub use error::{Error, PREVIEW_CHARS, Reason, Result};
 pub use join::{clean, join, sanitize};
 pub use kind::{Kind, Scope};
+#[cfg(windows)]
+pub use ops::{FileAccess, file_access};
 pub use ops::{
     MAX_WALK_DEPTH, copy, exists, find, list, make_dir, make_file, move_to, remove, write_atomic,
 };

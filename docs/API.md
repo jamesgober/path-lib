@@ -18,7 +18,7 @@
 </div>
 <br>
 
-> **Status:** This reference tracks the public surface of `path-lib` **1.1.1**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
+> **Status:** This reference tracks the public surface of `path-lib` **1.2.0**. Everything documented here is frozen for 1.x under the [stability contract](./STABILITY-1.0.md).
 
 ## Table of Contents
 
@@ -37,6 +37,7 @@
 - [Validation Rules](#validation-rules)
 - [Filesystem Operations](#filesystem-operations)
   - [`write_atomic`](#write_atomic)
+  - [`file_access`](#file_access)
 - [Errors](#errors)
   - [Reasons](#reasons)
 - [Design Notes](#design-notes)
@@ -339,6 +340,7 @@ Every rule applies on every platform, so a path accepted on Linux is also valid 
 | `move_to(from, to)` | Atomic rename, or copy then delete across volumes |
 | `find(root, pattern)` | Recursive name search with `*` and `?`; sorted |
 | `write_atomic(path, contents)` | Replaces a file's contents atomically; creates the file and its parents if missing |
+| `file_access(&file)` | Windows only: whether other accounts can change or read an open file (since 1.2) |
 
 Guarantees:
 
@@ -372,6 +374,37 @@ The contents are written to a hidden temporary sibling, flushed to disk with `sy
 - **Failure.** On any error the temporary file is removed and the original file is untouched.
 
 It is the one operation in the crate whose purpose is to overwrite. Use it for configuration, state, and other files that must never be seen half-written.
+
+### `file_access`
+
+Windows only, since 1.2. Reports who besides the current user, `SYSTEM`, and `Administrators` can change or read an open file. Check configuration, `.env`, and secret files with it after opening them and before reading them. A machine-wide directory such as `%ProgramData%\<app>\config` lets every local user create files by default, so a service that reads its configuration from there cannot assume the files are its own.
+
+```rust
+use std::fs::File;
+
+let file = File::open(&config)?;
+let access = path_lib::file_access(&file)?;
+if !access.enforced || !access.owner_trusted || access.others_can_write {
+    return Err("another account can change the configuration".into());
+}
+// For a secret, also refuse `access.others_can_read`.
+```
+
+`FileAccess` is `Debug + Clone + Copy + PartialEq + Eq` and `#[non_exhaustive]`:
+
+| Field | Meaning |
+|---|---|
+| `enforced` | The volume keeps access control lists (`FILE_PERSISTENT_ACLS`). When `false` (FAT, exFAT, some network shares) anyone can change any file there; the other fields are then set to the unsafe answer (owner not trusted, others can write and read) |
+| `owner_trusted` | The owner is the current user, `SYSTEM` (`S-1-5-18`), or `BUILTIN\Administrators` (`S-1-5-32-544`) |
+| `others_can_write` | The DACL grants another account a right that changes the file, its attributes, or its security: write or append data, write extended attributes or attributes, delete, change permissions, take ownership, generic write, or generic all. `OWNER RIGHTS` (`S-1-3-4`) is trusted exactly when the owner is. A NULL DACL makes this `true` |
+| `others_can_read` | The same for read data, generic read, or generic all |
+
+- **From the handle.** The owner and the access control list come from the open handle (`GetSecurityInfo`), never from the path, so the file checked is the file read. The handle needs `READ_CONTROL`, which `File::open` and `File::create` both request; without it the call fails with `PermissionDenied`.
+- **Errs toward refusing.** Only entries that grant access and apply to the file itself are counted. Deny entries are ignored, so the answer can overstate what other accounts can do but never understate it. Groups the current user belongs to, such as `Users` or `Everyone`, count as other accounts, because other users belong to them too.
+- **Malformed data.** The security descriptor is parsed with every offset and length checked; anything inconsistent fails with `InvalidData`.
+- **Cost.** Three system calls (volume flags, security descriptor, process token) and one pass over the access control list.
+
+On Unix, the same check is the mode and owner of the open descriptor (`std::os::unix::fs::MetadataExt`), so the crate adds nothing there.
 
 <br>
 
@@ -414,4 +447,4 @@ The [validation rules](#validation-rules) list the reasons `join` and the `*_at`
 
 **Testability.** Every platform table is resolved through an injected environment lookup, so the rules are unit-tested against arbitrary (including hostile) environments without touching the real one.
 
-**One `unsafe` block family.** Windows Known Folders need `SHGetKnownFolderPath`. The crate declares that one function and `CoTaskMemFree` directly instead of depending on `windows-sys`; every `unsafe` block carries a `SAFETY` comment and the crate root denies `unsafe_code` everywhere else.
+**`unsafe` only at the Windows boundary.** Windows Known Folders need `SHGetKnownFolderPath`, private directories need a security descriptor for `CreateDirectoryW`, and `file_access` needs `GetSecurityInfo`. The crate declares these functions directly instead of depending on `windows-sys`; every `unsafe` block carries a `SAFETY` comment, the security descriptor read by `file_access` is parsed as a bounds-checked byte slice, and the crate root denies `unsafe_code` everywhere else.
