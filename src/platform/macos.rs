@@ -154,19 +154,19 @@ mod tests {
     #[test]
     fn test_user_layout_matches_apple_guidelines() {
         let env = env_from(&[("HOME", "/Users/u"), ("TMPDIR", "/var/folders/ab/T/")]);
-        let l = UserBases::resolve(&env).map(|b| b.layout("HiveDB")).ok();
+        let l = UserBases::resolve(&env).map(|b| b.layout("MyApp")).ok();
         let l = l.as_ref();
         assert_eq!(
             l.map(|l| l.data.as_path()),
-            Some(Path::new("/Users/u/Library/Application Support/HiveDB"))
+            Some(Path::new("/Users/u/Library/Application Support/MyApp"))
         );
         assert_eq!(
             l.map(|l| l.config.as_path()),
-            Some(Path::new("/Users/u/Library/Preferences/HiveDB"))
+            Some(Path::new("/Users/u/Library/Preferences/MyApp"))
         );
         assert_eq!(
             l.map(|l| l.temp.as_path()),
-            Some(Path::new("/var/folders/ab/T/HiveDB"))
+            Some(Path::new("/var/folders/ab/T/MyApp"))
         );
         if let Some(l) = l {
             assert_distinct(l);
@@ -211,12 +211,12 @@ mod tests {
     #[test]
     fn test_system_layout_uses_library_domain() {
         let l = SystemBases::resolve(&|_: &str| None)
-            .map(|s| s.layout("HiveDB"))
+            .map(|s| s.layout("MyApp"))
             .ok();
         let l = l.as_ref();
         assert_eq!(
             l.map(|l| l.data.as_path()),
-            Some(Path::new("/Library/Application Support/HiveDB"))
+            Some(Path::new("/Library/Application Support/MyApp"))
         );
         if let Some(l) = l {
             assert_distinct(l);

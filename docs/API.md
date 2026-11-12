@@ -58,14 +58,14 @@
 | `App::portable(name, root)` | Everything under `root` | Name invalid; `root` empty |
 | `App::auto(name)` | Portable beside the executable, or current user | As for `portable` or `new` |
 
-The name becomes a directory name, so it follows the single-segment [validation rules](#validation-rules) and may not start with `~`. It is used exactly as given; `App::new("HiveDB")` produces `HiveDB` directories on every platform.
+The name becomes a directory name, so it follows the single-segment [validation rules](#validation-rules) and may not start with `~`. It is used exactly as given; `App::new("MyApp")` produces `MyApp` directories on every platform.
 
 ```rust
 use path_lib::App;
 
-let user = App::new("HiveDB")?;
-let svc = App::global("HiveDB")?;
-let port = App::portable("HiveDB", path_lib::exe_dir()?)?;
+let user = App::new("MyApp")?;
+let svc = App::global("MyApp")?;
+let port = App::portable("MyApp", path_lib::exe_dir()?)?;
 # Ok::<(), path_lib::Error>(())
 ```
 
@@ -76,7 +76,7 @@ let port = App::portable("HiveDB", path_lib::exe_dir()?)?;
 ```rust
 use path_lib::{App, Scope};
 
-let app = App::auto("HiveDB")?;
+let app = App::auto("MyApp")?;
 assert!(matches!(app.scope(), Scope::User | Scope::Portable));
 # Ok::<(), path_lib::Error>(())
 ```
@@ -88,10 +88,10 @@ assert!(matches!(app.scope(), Scope::User | Scope::Portable));
 ```rust
 use path_lib::{App, Kind};
 
-let data = std::env::temp_dir().join("hivedb-data");
-let app = App::new("HiveDB")?
+let data = std::env::temp_dir().join("myapp-data");
+let app = App::new("MyApp")?
     .with_dir(Kind::Data, &data)?    // explicit
-    .with_env("HIVEDB")?;            // HIVEDB_DATA_DIR, HIVEDB_LOGS_DIR, ...
+    .with_env("MYAPP")?;            // MYAPP_DATA_DIR, MYAPP_LOGS_DIR, ...
 # let _ = app;
 # Ok::<(), path_lib::Error>(())
 ```
@@ -103,12 +103,12 @@ let app = App::new("HiveDB")?
 
 Both take and return the `App` by value, so they chain after any constructor. The new directory must be absolute; it is cleaned, and it is not created until `ensure` or `create`. An override that would equal the directory of another kind is rejected with `Reason::SharedDir`, which keeps every kind distinct. Setting a kind to its current directory is allowed.
 
-`with_env` reads one variable per kind, named with [`Kind::env_name`](#kind-and-scope). With the prefix `HIVEDB` these are `HIVEDB_DATA_DIR`, `HIVEDB_CONFIG_DIR`, `HIVEDB_CACHE_DIR`, `HIVEDB_LOGS_DIR`, `HIVEDB_STATE_DIR`, `HIVEDB_RUNTIME_DIR`, `HIVEDB_TEMP_DIR`, and `HIVEDB_DOCUMENTS_DIR`. Unset and empty variables leave the directory unchanged. Other values go through the same checks as `with_dir`, in `Kind::ALL` order, and an error's `path` reads `NAME=value` so the offending variable is easy to find. The prefix must be non-empty ASCII letters, digits, and `_`, not starting with a digit; otherwise `with_env` fails with `InvalidName`.
+`with_env` reads one variable per kind, named with [`Kind::env_name`](#kind-and-scope). With the prefix `MYAPP` these are `MYAPP_DATA_DIR`, `MYAPP_CONFIG_DIR`, `MYAPP_CACHE_DIR`, `MYAPP_LOGS_DIR`, `MYAPP_STATE_DIR`, `MYAPP_RUNTIME_DIR`, `MYAPP_TEMP_DIR`, and `MYAPP_DOCUMENTS_DIR`. Unset and empty variables leave the directory unchanged. Other values go through the same checks as `with_dir`, in `Kind::ALL` order, and an error's `path` reads `NAME=value` so the offending variable is easy to find. The prefix must be non-empty ASCII letters, digits, and `_`, not starting with a digit; otherwise `with_env` fails with `InvalidName`.
 
 ### Directories
 
 ```rust
-# let app = path_lib::App::new("HiveDB")?;
+# let app = path_lib::App::new("MyApp")?;
 let data: &std::path::Path = app.data();
 let same = app.dir(path_lib::Kind::Data);
 # assert_eq!(data, same);
@@ -118,7 +118,7 @@ let same = app.dir(path_lib::Kind::Data);
 `data()`, `config()`, `cache()`, `logs()`, `state()`, `runtime()`, `temp()`, `documents()`, and `dir(kind)` return `&Path`. `dirs()` iterates `(Kind, &Path)` pairs in `Kind::ALL` order. `name()` and `scope()` return what the `App` was built with. `Display` prints a table of every directory.
 
 ```rust
-# let app = path_lib::App::new("HiveDB")?;
+# let app = path_lib::App::new("MyApp")?;
 for (kind, dir) in app.dirs() {
     println!("{kind:<9} {}", dir.display());
 }
@@ -128,7 +128,7 @@ for (kind, dir) in app.dirs() {
 ### Sub-paths
 
 ```rust
-# let app = path_lib::App::new("HiveDB")?;
+# let app = path_lib::App::new("MyApp")?;
 let p = app.data_at("big/sloppy/floppy")?;            // PathBuf
 let q = app.at(path_lib::Kind::Data, "\\big\\sloppy\\floppy\\")?;
 assert_eq!(p, q);

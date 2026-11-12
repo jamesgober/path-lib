@@ -40,7 +40,7 @@
 - **Eight kinds** &mdash; data, config, cache, logs, state, runtime, temp, documents
 - **Three scopes** &mdash; `App::new` (this user), `App::global` (the machine), `App::portable` (one folder you choose)
 - **Portable detection** &mdash; `App::auto` switches to a portable layout when a `.portable` file sits next to the executable
-- **Overrides** &mdash; `with_dir` relocates one kind; `with_env("HIVEDB")` reads `HIVEDB_DATA_DIR`, `HIVEDB_LOGS_DIR`, and so on
+- **Overrides** &mdash; `with_dir` relocates one kind; `with_env("MYAPP")` reads `MYAPP_DATA_DIR`, `MYAPP_LOGS_DIR`, and so on
 - **Native conventions** &mdash; XDG and FHS on Linux and BSD, the `Library` domains on macOS, Known Folders on Windows
 - **Distinct by construction** &mdash; no two kinds share a directory, and overrides are checked too. Some kinds nest inside others (on Windows, cache and logs inside data), so `remove` refuses a path that holds another kind and `clear` empties one kind while keeping those nested in it
 - **Checked before use** &mdash; an existing directory of the application must be owned by the current user or an administrator and not writable by others, so a directory another user created first in `%ProgramData%` or `/var/tmp` is refused
@@ -81,11 +81,11 @@ path-lib = "1.3"
 ```rust
 use path_lib::{App, Kind};
 
-// Per-user directories, relocatable with HIVEDB_DATA_DIR and friends.
-let app = App::new("HiveDB")?.with_env("HIVEDB")?;
+// Per-user directories, relocatable with MYAPP_DATA_DIR and friends.
+let app = App::new("MyApp")?.with_env("MYAPP")?;
 
 // Base directories, resolved once.
-println!("{}", app.data().display());     // ~/Library/Application Support/HiveDB on macOS
+println!("{}", app.data().display());     // ~/Library/Application Support/MyApp on macOS
 
 // Hardened sub-paths: any slash style, always inside the base.
 let db = app.data_at("/big\\sloppy//floppy/")?;
@@ -95,11 +95,11 @@ assert!(app.data_at("../../etc/passwd").is_err());
 let wal = app.create(Kind::Data, "db/wal")?;
 
 // Replace a file atomically: readers see the old or the new contents.
-path_lib::write_atomic(app.config_at("hivedb.toml")?, "port = 7000\n")?;
+path_lib::write_atomic(app.config_at("myapp.toml")?, "port = 7000\n")?;
 
 // Machine-wide, for services.
-let svc = App::global("HiveDB")?;
-println!("{}", svc.config().display());   // /etc/HiveDB on Linux
+let svc = App::global("MyApp")?;
+println!("{}", svc.config().display());   // /etc/MyApp on Linux
 # Ok::<(), path_lib::Error>(())
 ```
 
@@ -124,7 +124,7 @@ The full tables, including state, runtime, temp, and documents, are in the [API 
 ### User Input
 
 ```rust
-let app = path_lib::App::new("HiveDB")?;
+let app = path_lib::App::new("MyApp")?;
 
 // Reject: for paths your code builds.
 let p = app.documents_at("exports/2026")?;

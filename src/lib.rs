@@ -13,8 +13,8 @@
 //! ```
 //! use path_lib::App;
 //!
-//! let app = App::new("HiveDB")?;          // this user
-//! let svc = App::global("HiveDB")?;       // the whole machine
+//! let app = App::new("MyApp")?;          // this user
+//! let svc = App::global("MyApp")?;       // the whole machine
 //!
 //! let data = app.data();                  // &Path, resolved once
 //! let db = app.data_at("db/main")?;       // hardened sub-path
@@ -61,10 +61,10 @@
 //! ```
 //! use path_lib::{App, Kind};
 //!
-//! let cache = std::env::temp_dir().join("hivedb-cache");
-//! let app = App::new("HiveDB")?
+//! let cache = std::env::temp_dir().join("myapp-cache");
+//! let app = App::new("MyApp")?
 //!     .with_dir(Kind::Cache, &cache)?     // explicit
-//!     .with_env("HIVEDB")?;               // HIVEDB_DATA_DIR, ...
+//!     .with_env("MYAPP")?;               // MYAPP_DATA_DIR, ...
 //! # let _ = app;
 //! # Ok::<(), path_lib::Error>(())
 //! ```
